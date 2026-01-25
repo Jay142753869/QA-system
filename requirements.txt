@@ -1,0 +1,8 @@
+Flask>=2.0.0
+neo4j>=5.0.0
+pyahocorasick
+jieba
+transformers
+torch
+numpy
+pandas

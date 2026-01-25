@@ -1,0 +1,132 @@
+:root {
+    --main-bg-color: #f5f6fa;
+    --sidebar-bg-color: #2c3e50;
+    --primary-color: #0d6efd;
+}
+
+body {
+    overflow: hidden;
+    height: 100vh;
+    font-family: "Microsoft YaHei", sans-serif;
+}
+
+#wrapper {
+    overflow-x: hidden;
+    height: 100%;
+}
+
+#sidebar-wrapper {
+    min-height: 100vh;
+    margin-left: -15rem;
+    -webkit-transition: margin .25s ease-out;
+    -moz-transition: margin .25s ease-out;
+    -o-transition: margin .25s ease-out;
+    transition: margin .25s ease-out;
+    width: 15rem;
+    z-index: 1000;
+}
+
+#sidebar-wrapper .sidebar-heading {
+    padding: 0.875rem 1.25rem;
+    font-size: 1.2rem;
+}
+
+#sidebar-wrapper .list-group {
+    width: 15rem;
+}
+
+#page-content-wrapper {
+    min-width: 100vw;
+}
+
+#wrapper.toggled #sidebar-wrapper {
+    margin-left: 0;
+}
+
+@media (min-width: 768px) {
+    #sidebar-wrapper {
+        margin-left: 0;
+    }
+
+    #page-content-wrapper {
+        min-width: 0;
+        width: 100%;
+    }
+
+    #wrapper.toggled #sidebar-wrapper {
+        margin-left: -15rem;
+    }
+}
+
+/* Sidebar Links */
+.list-group-item {
+    border: none;
+    padding: 20px 30px;
+    color: #b8c7ce;
+}
+
+.list-group-item.active {
+    background-color: transparent;
+    color: #fff;
+    font-weight: bold;
+    border-left: 4px solid #fff;
+}
+
+.list-group-item:hover {
+    color: #fff;
+    background-color: rgba(255,255,255,0.1);
+}
+
+/* Chat Box */
+#chat-box {
+    background-color: var(--main-bg-color);
+}
+
+.chat-message {
+    max-width: 80%;
+    margin-bottom: 1rem;
+    clear: both;
+}
+
+.user-message {
+    float: right;
+    text-align: right;
+}
+
+.user-message .card {
+    background-color: #dcf8c6;
+    color: #000;
+    border-radius: 15px 15px 0 15px;
+}
+
+.system-message {
+    float: left;
+    text-align: left;
+}
+
+.system-message .card {
+    background-color: #fff;
+    border-radius: 15px 15px 15px 0;
+}
+
+/* Result Tables in Chat */
+.result-table {
+    font-size: 0.9rem;
+    margin-top: 10px;
+    width: 100%;
+}
+.result-table th, .result-table td {
+    padding: 5px;
+}
+
+.prediction-bar {
+    height: 8px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+    margin-top: 5px;
+    overflow: hidden;
+}
+.prediction-fill {
+    height: 100%;
+    background-color: var(--primary-color);
+}
