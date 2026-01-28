@@ -1,0 +1,6 @@
+nentity	2399
+nrelation	105
+ntrain	45548
+nvalid	950
+ntest	638
+ntimestamp	1187

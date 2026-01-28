@@ -38,3 +38,8 @@ ENV/
 
 # Logs
 *.log
+
+# Large Data Files
+models/RE-GCN-master/data/STRUCTURE/train.txt
+models/RE-GCN-master/data/STRUCTURE/test.txt
+models/RE-GCN-master/data/STRUCTURE/valid.txt

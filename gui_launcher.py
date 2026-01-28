@@ -3,7 +3,7 @@ import sys
 import threading
 import time
 import os
-from app import app, init_system
+from app import app
 
 # Ensure templates/static are found when frozen
 if getattr(sys, 'frozen', False):
@@ -13,10 +13,8 @@ if getattr(sys, 'frozen', False):
     app.static_folder = static_folder
 
 def start_server():
-    # Initialize the QA system before starting server
-    with app.app_context():
-        init_system()
     # Run Flask app
+    # Note: init_system is now handled asynchronously in app.py
     app.run(port=5000, use_reloader=False)
 
 def main():
@@ -24,9 +22,6 @@ def main():
     t = threading.Thread(target=start_server)
     t.daemon = True
     t.start()
-
-    # Give Flask a moment to start
-    time.sleep(1)
 
     # Create the window
     webview.create_window(

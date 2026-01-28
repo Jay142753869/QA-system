@@ -103,6 +103,43 @@ class SimilarityModel:
             logger.error(f"Error during encoding: {e}")
             return np.zeros(768)
 
+    def encode_list(self, text_list):
+        """Batch encode a list of texts."""
+        if self.use_mock:
+            return [self.encode(t) for t in text_list]
+        
+        embeddings = []
+        # Process one by one for simplicity (or batch if needed)
+        # For small relation list (few hundreds), one by one is fine for initialization
+        for text in text_list:
+            embeddings.append(self.encode(text))
+        return embeddings
+
+    def compute_similarity(self, query_emb, candidate_embs):
+        """
+        Compute cosine similarity between query embedding and a list of candidate embeddings.
+        Returns indices sorted by similarity (descending).
+        """
+        # query_emb: (D,)
+        # candidate_embs: (N, D)
+        
+        # Normalize
+        norm_q = np.linalg.norm(query_emb)
+        if norm_q == 0: return []
+        query_emb = query_emb / norm_q
+        
+        candidate_matrix = np.array(candidate_embs)
+        norm_c = np.linalg.norm(candidate_matrix, axis=1, keepdims=True)
+        norm_c[norm_c == 0] = 1
+        candidate_matrix = candidate_matrix / norm_c
+        
+        # Dot product
+        scores = np.dot(candidate_matrix, query_emb)
+        
+        # Sort indices
+        sorted_indices = np.argsort(scores)[::-1]
+        return sorted_indices, scores[sorted_indices]
+
 class NLPProcessor:
     """
     Main Preprocessing Module Coordinator.
@@ -117,15 +154,76 @@ class NLPProcessor:
         # In a real scenario, this would load from Neo4j or a file
         self._load_initial_data()
         
+        # BERT Relation Extraction Setup
+        self.relation_list = []
+        self.relation_embs = []
+        self._load_relations()
+
+    def _load_relations(self):
+        """Load relations from relation2id.txt and compute their embeddings."""
+        rel_file = os.path.join(self.config.get('REGCN_DATA_DIR', ''), 'relation2id.txt')
+        if not os.path.exists(rel_file):
+            # Fallback path logic or hardcoded typical path
+            rel_file = os.path.join(os.getcwd(), 'models', 'RE-GCN-master', 'data', '80STOCKS', 'relation2id.txt')
+        
+        if os.path.exists(rel_file):
+            logger.info(f"Loading relations from {rel_file}...")
+            with open(rel_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 1:
+                        self.relation_list.append(parts[0])
+            
+            # Pre-compute embeddings
+            logger.info(f"Computing BERT embeddings for {len(self.relation_list)} relations...")
+            self.relation_embs = self.sim_model.encode_list(self.relation_list)
+            logger.info("Relation embeddings computed.")
+        else:
+            logger.warning("relation2id.txt not found. BERT Relation Extraction will be disabled.")
+        
     def _load_initial_data(self):
-        # Sample entities from the domain
-        entities = [
-            "贵州茅台", "五粮液", "招商银行", "平安银行", "浦发银行", # Companies
-            "陆金海", "姜国华", "郭田勇", # People
-            "大股东", "独立董事", "董事长", "净利润", "营业收入", # Relations/Attributes
-            # "2024年", "2023年", "2022年", "5月", "12月" # Time - Now handled by dynamic regex
-        ]
-        self.ac_matcher.add_keywords(entities)
+        """Load entities from entity2id.txt and relations from relation2id.txt"""
+        # 1. Load entities from entity2id.txt
+        ent_file = os.path.join(self.config.get('REGCN_DATA_DIR', ''), 'entity2id.txt')
+        if not os.path.exists(ent_file):
+            # Fallback path
+            ent_file = os.path.join(os.getcwd(), 'models', 'RE-GCN-master', 'data', '80STOCKS', 'entity2id.txt')
+        
+        entities_to_add = []
+        if os.path.exists(ent_file):
+            logger.info(f"Loading entities from {ent_file}...")
+            with open(ent_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 1:
+                        # parts[0] is the entity name
+                        entities_to_add.append(parts[0])
+            logger.info(f"Loaded {len(entities_to_add)} entities.")
+        else:
+            logger.warning("entity2id.txt not found. Using default sample entities.")
+            # Sample entities from the domain (Fallback)
+            entities_to_add = [
+                "贵州茅台", "五粮液", "招商银行", "平安银行", "浦发银行", "万华化学",
+                "陆金海", "姜国华", "郭田勇"
+            ]
+
+        rel_file = os.path.join(self.config.get('REGCN_DATA_DIR', ''), 'relation2id.txt')
+        if not os.path.exists(rel_file):
+            rel_file = os.path.join(os.getcwd(), 'models', 'RE-GCN-master', 'data', '80STOCKS', 'relation2id.txt')
+
+        relations = []
+        if os.path.exists(rel_file):
+            with open(rel_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 1 and parts[0]:
+                        relations.append(parts[0])
+        relations.extend(["大股东", "独立董事"])
+        
+        # Add all to AC Matcher
+        self.ac_matcher.add_keywords(entities_to_add)
+        self.ac_matcher.add_keywords(relations)
+        
         self.ac_matcher.build()
         
     def analyze(self, text):
@@ -143,14 +241,46 @@ class NLPProcessor:
         enriched_matches = []
         
         # 1. AC Automaton Match (Priority 1: Known Knowledge)
-        ac_matches = self.ac_matcher.search(text)
+        raw_matches = self.ac_matcher.search(text)
         
-        for match in ac_matches:
+        # Filter overlapping matches (Keep Longest Match Principle)
+        # Sort by length descending to prioritize longer matches (e.g. "交通银行" > "银行")
+        raw_matches.sort(key=lambda x: len(x['word']), reverse=True)
+        
+        final_ac_matches = []
+        occupied_indices = set()
+        
+        for match in raw_matches:
+            start = match['start']
+            end = match['end'] # Inclusive 0-based indices
+            
+            # Check for overlap with already selected (longer) matches
+            is_overlap = False
+            for i in range(start, end + 1):
+                if i in occupied_indices:
+                    is_overlap = True
+                    break
+            
+            if not is_overlap:
+                final_ac_matches.append(match)
+                # Mark indices as occupied
+                for i in range(start, end + 1):
+                    occupied_indices.add(i)
+        
+        for match in final_ac_matches:
             word = match['word']
             match_type = "UNKNOWN"
             
             # Heuristic mapping for AC matches
-            if word in ["大股东", "独立董事", "董事长", "净利润", "营业收入"]:
+            # TODO: Better distinction between entity and relation
+            # Check if it's in relation_list
+            if word in self.relation_list or word in ["大股东", "独立董事", "董事长", "净利润", "营业收入", "高管", "监事会提名委员会委员", "风险总监"]:
+                # But wait, relation_list is loaded AFTER this method is called in __init__
+                # Actually _load_relations is called after _load_initial_data
+                # So self.relation_list is empty here? No, ac_matcher.search is called in analyze(), which is after __init__.
+                # So self.relation_list should be populated.
+                
+                # Priority: If it's in our known relation list, it's a relation
                 quadruple['r'] = word
                 match_type = "RELATION"
             else:
@@ -167,10 +297,14 @@ class NLPProcessor:
         # 2. Dynamic Regex Match (Priority 2: Time)
         # Match patterns like: 2018年, 2024年, 5月, 2024-05
         time_patterns = [
-            r"(\d{4}年)",       # 2018年
-            r"(\d{1,2}月)",     # 5月
-            r"(\d{4}-\d{1,2})", # 2024-05
-            r"(\d{4})"          # 2018 (Context dependent, usually year)
+            r"(\d{8})",
+            r"(\d{4}年\d{1,2}月\d{1,2}日)",
+            r"(\d{4}年\d{1,2}月)",
+            r"(\d{4}-\d{1,2}-\d{1,2})",
+            r"(\d{4}-\d{1,2})",
+            r"(\d{4}年)",
+            r"(\d{1,2}月)",
+            r"(\d{4})"
         ]
         
         for pattern in time_patterns:
@@ -226,6 +360,44 @@ class NLPProcessor:
 
         # 4. Get Embedding
         embedding = self.sim_model.encode(text)
+        
+        # 5. BERT-based Relation Extraction (Fallback if no relation found)
+        if not quadruple['r'] and self.relation_list:
+            # Extract "unknown" parts of the query to match against relations
+            # Simple approach: remove detected entities and times
+            remaining_text = text
+            for m in enriched_matches:
+                remaining_text = remaining_text.replace(m['word'], "")
+            
+            # Remove common stopwords/punctuation
+            for stop in ["是", "谁", "的", "?", "？", "查询", "我想知道", "告诉我"]:
+                remaining_text = remaining_text.replace(stop, "")
+            
+            remaining_text = remaining_text.strip()
+            
+            if remaining_text:
+                logger.info(f"Attempting BERT matching for relation using text: '{remaining_text}'")
+                query_emb = self.sim_model.encode(remaining_text)
+                
+                # Check cache logic could go here, but compute_similarity is fast for 237 items
+                indices, scores = self.sim_model.compute_similarity(query_emb, self.relation_embs)
+                
+                if len(indices) > 0:
+                    top_idx = indices[0]
+                    top_score = scores[0]
+                    top_rel = self.relation_list[top_idx]
+                    
+                    logger.info(f"BERT Top match: {top_rel} (score: {top_score:.4f})")
+                    
+                    # Threshold check (e.g., 0.6)
+                    if top_score > 0.6: # Adjust this threshold as needed
+                        quadruple['r'] = top_rel
+                        enriched_matches.append({
+                            "word": remaining_text, # Or the matched relation name? Let's show the matched part
+                            "start": -1, # Hard to map back exactly without alignment
+                            "end": -1,
+                            "type": f"RELATION (BERT: {top_rel})"
+                        })
         
         return {
             "original_text": text,

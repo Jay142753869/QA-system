@@ -140,13 +140,12 @@ $(document).ready(function() {
         }
 
         // 2. Graph Result
+        content += `<strong><i class="fas fa-database text-success"></i> 知识库查询结果:</strong><br>`;
         if (data.graph_result && data.graph_result.length > 0) {
-            content += `<strong><i class="fas fa-database text-success"></i> 知识库查询结果:</strong><br>`;
-            if (typeof data.graph_result[0] === 'string') {
-                 content += `<div class="alert alert-light border mt-2">${data.graph_result[0]}</div>`;
-            } else {
-                 content += `<div class="alert alert-success mt-2">${data.graph_result.join(', ')}</div>`;
-            }
+            content += `<div class="alert alert-success mt-2">${data.graph_result.join(', ')}</div>`;
+        } else {
+            const msg = data.graph_message || "暂无数据";
+            content += `<div class="alert alert-light border mt-2">${msg}</div>`;
         }
 
         // 3. Reasoning Result
@@ -155,12 +154,19 @@ $(document).ready(function() {
             content += `<div class="mt-3"><strong><i class="fas fa-brain text-info"></i> ${title}:</strong></div>`;
             
             content += `<div class="list-group mt-2">`;
-            data.reasoning_result.forEach((item, index) => {
-                let badgeClass = index === 0 ? 'bg-danger' : 'bg-secondary';
+            const filtered = data.reasoning_result.filter(item => {
+                const s = item.score ?? item.probability;
+                if (typeof s === 'number') return s >= 0.05;
+                return true;
+            });
+            filtered.forEach((item, index) => {
+                const badgeClass = index === 0 ? 'bg-danger' : 'bg-secondary';
+                const rawScore = item.score ?? item.probability;
+                const scoreText = typeof rawScore === 'number' ? rawScore.toFixed(2) : rawScore;
                 content += `
                     <div class="list-group-item d-flex justify-content-between align-items-center">
-                        ${item.name || item.prediction}
-                        <span class="badge ${badgeClass} rounded-pill">${item.score || item.probability}</span>
+                        <div>${item.name || item.prediction}</div>
+                        <span class="badge ${badgeClass} rounded-pill">${scoreText}</span>
                     </div>
                 `;
             });
