@@ -43,3 +43,7 @@ ENV/
 models/RE-GCN-master/data/STRUCTURE/train.txt
 models/RE-GCN-master/data/STRUCTURE/test.txt
 models/RE-GCN-master/data/STRUCTURE/valid.txt
+
+# TiRGN large assets (distributed via GitHub Release zip)
+models/TiRGN-main/data/
+models/TiRGN-main/models/

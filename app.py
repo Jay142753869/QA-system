@@ -120,7 +120,9 @@ def query():
         graph_result = state.graph_dao.query_entity_relation(h, r, time)
         response_data['graph_result'] = graph_result
         if not graph_result:
-            response_data['graph_message'] = "暂无数据"
+            response_data['graph_message'] = "暂无参考数据" if mode == "external" else "暂无数据"
+        elif mode == "external":
+            response_data['graph_message'] = "知识库参考（用于对比）"
     else:
         response_data['graph_message'] = "未能识别明确的实体或关系，无法直接查询知识库。"
 
@@ -142,11 +144,15 @@ def query():
             
     elif mode == 'external':
         # External Reasoning (Future/Event)
-        if h:
-            predictions = state.reasoning_engine.external_reasoning(h, time)
-            response_data['reasoning_result'] = [
-                {"name": p[0], "score": p[1]} for p in predictions
-            ]
+        if h and r:
+            predictions = state.reasoning_engine.external_reasoning_tirgn(h, r, time)
+            response_data['reasoning_result'] = predictions
+        else:
+            response_data['reasoning_result'] = []
+            if not h:
+                response_data['graph_message'] = "未能识别明确的实体，无法调用外推模型。"
+            elif not r:
+                response_data['graph_message'] = "未能识别明确的关系，外推模型需要实体与关系。"
             
     return jsonify(response_data)
 

@@ -79,7 +79,7 @@ class GraphDAO:
         results = set()
         best_time = None
         try:
-            with open(self.local_csv_path, 'r', encoding='utf-8') as f:
+            with open(self.local_csv_path, 'r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     if row.get('head') != str(entity):

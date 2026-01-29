@@ -1,5 +1,6 @@
 $(document).ready(function() {
     let currentMode = 'internal';
+    const chatHistoryByMode = { internal: "", external: "" };
 
     // Sidebar Toggle
     $("#menu-toggle").click(function(e) {
@@ -19,6 +20,7 @@ $(document).ready(function() {
     });
 
     function switchMode(mode) {
+        chatHistoryByMode[currentMode] = $("#chat-box").html();
         currentMode = mode;
         $(".list-group-item").removeClass("active");
         if (mode === 'internal') {
@@ -29,6 +31,11 @@ $(document).ready(function() {
             $("#btn-external").addClass("active");
             $("#header-title").text("调用外推模型");
             $("#current-mode-text").text("外推");
+        }
+
+        $("#chat-box").html(chatHistoryByMode[currentMode] || "");
+        if (!chatHistoryByMode[currentMode]) {
+            appendMessage('system', mode === 'internal' ? '已切换到内推模式。' : '已切换到外推模式。');
         }
     }
 
@@ -140,7 +147,8 @@ $(document).ready(function() {
         }
 
         // 2. Graph Result
-        content += `<strong><i class="fas fa-database text-success"></i> 知识库查询结果:</strong><br>`;
+        const graphTitle = currentMode === 'internal' ? '知识库查询结果' : '知识库参考（对比）';
+        content += `<strong><i class="fas fa-database text-success"></i> ${graphTitle}:</strong><br>`;
         if (data.graph_result && data.graph_result.length > 0) {
             content += `<div class="alert alert-success mt-2">${data.graph_result.join(', ')}</div>`;
         } else {
@@ -150,26 +158,31 @@ $(document).ready(function() {
 
         // 3. Reasoning Result
         if (data.reasoning_result && data.reasoning_result.length > 0) {
-            const title = currentMode === 'internal' ? "内推模型预测结果 (Top 5)" : "外推模型预测结果 (Top 5)";
+            const title = currentMode === 'internal' ? "内推模型预测结果 (Top 5)" : "TiRGN 外推预测结果 (Top 5)";
             content += `<div class="mt-3"><strong><i class="fas fa-brain text-info"></i> ${title}:</strong></div>`;
             
             content += `<div class="list-group mt-2">`;
+            const minScore = currentMode === 'internal' ? 0.05 : 0.01;
             const filtered = data.reasoning_result.filter(item => {
                 const s = item.score ?? item.probability;
-                if (typeof s === 'number') return s >= 0.05;
+                if (typeof s === 'number') return s >= minScore;
                 return true;
             });
-            filtered.forEach((item, index) => {
-                const badgeClass = index === 0 ? 'bg-danger' : 'bg-secondary';
-                const rawScore = item.score ?? item.probability;
-                const scoreText = typeof rawScore === 'number' ? rawScore.toFixed(2) : rawScore;
-                content += `
-                    <div class="list-group-item d-flex justify-content-between align-items-center">
-                        <div>${item.name || item.prediction}</div>
-                        <span class="badge ${badgeClass} rounded-pill">${scoreText}</span>
-                    </div>
-                `;
-            });
+            if (filtered.length === 0) {
+                content += `<div class="list-group-item text-muted">无满足阈值 (${minScore}) 的预测结果</div>`;
+            } else {
+                filtered.forEach((item, index) => {
+                    const badgeClass = index === 0 ? 'bg-danger' : 'bg-secondary';
+                    const rawScore = item.score ?? item.probability;
+                    const scoreText = typeof rawScore === 'number' ? rawScore.toFixed(2) : rawScore;
+                    content += `
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>${item.name || item.prediction}</div>
+                            <span class="badge ${badgeClass} rounded-pill">${scoreText}</span>
+                        </div>
+                    `;
+                });
+            }
             content += `</div>`;
         }
 

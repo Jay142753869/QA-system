@@ -4,7 +4,7 @@ import sys
 def get_base_path():
     if getattr(sys, 'frozen', False):
         return sys._MEIPASS
-    return os.getcwd()
+    return os.path.dirname(os.path.abspath(__file__))
 
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'you-will-never-guess'
@@ -62,4 +62,40 @@ class Config:
         'relation_prediction': False,
         'add_static_graph': False,
         'run_analysis': False
+    }
+
+    # TiRGN Configuration (External Reasoning)
+    TIRGN_BASE_DIR = os.path.join(BASE_PATH, 'models', 'TiRGN-main')
+    TIRGN_DATASET = '80STOCKS'
+    TIRGN_MODEL_FILE = 'gl_rate_0.3-80STOCKS-convgcn-timeconvtranse-ly2-dilate1-his9-weight_0.5-discount_1.0-angle_14-dp0.2_0.2_0.2_0.2-gpu0-checkpoint'
+    TIRGN_MODEL_PATH = os.path.join(TIRGN_BASE_DIR, 'models', TIRGN_MODEL_FILE)
+    TIRGN_DATA_DIR = os.path.join(TIRGN_BASE_DIR, 'data', TIRGN_DATASET)
+    TIRGN_HISTORY_DIR = os.path.join(TIRGN_DATA_DIR, 'history')
+
+    TIRGN_PARAMS = {
+        'encoder': 'convgcn',
+        'decoder': 'timeconvtranse',
+        'n_layers': 2,
+        'train_history_len': 9,
+        'dilate_len': 1,
+        'history_rate': 0.3,
+        'weight': 0.5,
+        'discount': 1.0,
+        'angle': 14,
+        'dropout': 0.2,
+        'input_dropout': 0.2,
+        'hidden_dropout': 0.2,
+        'feat_dropout': 0.2,
+        'gpu': 0,
+        'n_hidden': 200,
+        'n_bases': 100,
+        'n_basis': 100,
+        'opn': 'sub',
+        'self_loop': True,
+        'skip_connect': False,
+        'aggregation': 'none',
+        'num_times': 380,
+        'time_interval': 1,
+        'use_static': True,
+        'run_analysis': False,
     }
