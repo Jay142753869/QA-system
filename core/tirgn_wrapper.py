@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class TiRGNWrapper:
+    RELATION_ALIASES = {
+        "独董": "独立董事",
+    }
+
     def __init__(self, config):
         self.config = config
         self.base_dir = config["TIRGN_BASE_DIR"]
@@ -47,6 +51,7 @@ class TiRGNWrapper:
 
         self._tail_history_cache = {}
         self._rel_history_cache = {}
+        self._cache_lock = __import__('threading').Lock()
 
         self._load_mappings()
         self._load_data()
@@ -258,16 +263,57 @@ class TiRGNWrapper:
         best = max(candidates)
         return int(self.time2id[best])
 
+    def _latest_time_id(self):
+        """Return the latest time id available in the loaded dataset."""
+        return int(self.times.max())
+
+    def _resolve_prediction_time_id(self, time_str):
+        """
+        Resolve prediction time safely.
+
+        If the user omits time, we use the latest snapshot.
+        If a time is provided but cannot be resolved, we surface the issue
+        instead of silently switching to the latest timestamp.
+        """
+        if not time_str:
+            return self._latest_time_id(), None
+
+        t_id = self._resolve_time_id(time_str)
+        if t_id is None:
+            return None, f"Unknown or unsupported time: {time_str}"
+        return t_id, None
+
+    def _resolve_relation_name(self, relation_name):
+        """Map user-facing relation aliases to model-supported relation names."""
+        relation_name = (relation_name or "").strip()
+        if not relation_name:
+            return None
+        if relation_name in self.relation2id:
+            return relation_name
+
+        alias_target = self.RELATION_ALIASES.get(relation_name)
+        if alias_target and alias_target in self.relation2id:
+            return alias_target
+
+        candidates = [name for name in self.relation2id if relation_name in name]
+        if candidates:
+            return min(candidates, key=len)
+        return None
+
     def _load_history_npz(self, kind, time_id):
         cache = self._tail_history_cache if kind == "tail" else self._rel_history_cache
-        if time_id in cache:
-            return cache[time_id]
+        with self._cache_lock:
+            if time_id in cache:
+                return cache[time_id]
         filename = f"{kind}_history_{time_id}.npz"
         path = os.path.join(self.history_dir, filename)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Missing {kind} history file for time id {time_id}: {path}")
         mat = sp.load_npz(path)
-        if len(cache) >= 8:
-            cache.clear()
-        cache[time_id] = mat
+        with self._cache_lock:
+            if len(cache) >= 8:
+                cache.clear()
+            cache[time_id] = mat
         return mat
 
     def _build_history_vocab(self, test_triplets, time_id):
@@ -295,15 +341,18 @@ class TiRGNWrapper:
         head_name = (head_name or "").strip()
         relation_name = (relation_name or "").strip()
         h_id = self.entity2id.get(head_name)
-        r_id = self.relation2id.get(relation_name)
+        resolved_relation = self._resolve_relation_name(relation_name)
+        r_id = self.relation2id.get(resolved_relation) if resolved_relation else None
         if h_id is None:
             return [{"name": f"Unknown entity: {head_name}", "score": 0.0, "source": "Input Error"}]
         if r_id is None:
-            return [{"name": f"Unknown relation: {relation_name}", "score": 0.0, "source": "Input Error"}]
+            logger.warning(f"TiRGN relation not supported for reasoning: {relation_name}")
+            return []
 
-        t_id = self._resolve_time_id(time_str)
-        if t_id is None:
-            t_id = int(self.times.max())
+        t_id, time_error = self._resolve_prediction_time_id(time_str)
+        if time_error:
+            logger.warning(time_error)
+            return [{"name": time_error, "score": 0.0, "source": "Input Error"}]
         snap_idx = self.time_to_snap_idx.get(t_id, None)
         history_len = int(self.params.get("train_history_len", 9))
 
@@ -327,7 +376,11 @@ class TiRGNWrapper:
         if self.use_cuda:
             test_triplets = test_triplets.cuda(self.gpu)
 
-        one_hot_tail_seq, one_hot_rel_seq = self._build_history_vocab(test_triplets, int(t_id))
+        try:
+            one_hot_tail_seq, one_hot_rel_seq = self._build_history_vocab(test_triplets, int(t_id))
+        except FileNotFoundError as e:
+            logger.error(f"TiRGN history load failed: {e}")
+            return [{"name": str(e), "score": 0.0, "source": "TiRGN Error"}]
 
         all_triples, score_log, _ = self.model.predict(
             history_glist,
@@ -339,12 +392,15 @@ class TiRGNWrapper:
             self.use_cuda,
         )
 
-        probs = torch.exp(score_log[0]).detach().cpu().numpy()
-        top_indices = probs.argsort()[-top_k:][::-1]
+        log_probs_tensor = score_log[0].detach().cpu()
+        
+        # Apply Top-K Local Softmax Re-normalization
+        top_k_vals, top_k_indices = torch.topk(log_probs_tensor, min(top_k, len(log_probs_tensor)))
+        top_probs = torch.softmax(top_k_vals, dim=0).numpy()
+        top_indices = top_k_indices.numpy()
 
         results = []
-        for idx in top_indices:
-            prob = float(probs[idx])
-            results.append({"name": str(self.id2entity.get(int(idx), str(idx))).strip(), "score": prob, "source": "TiRGN"})
+        for i, idx in enumerate(top_indices):
+            prob = float(top_probs[i])
+            results.append({"name": str(self.id2entity.get(int(idx), str(idx))).strip(), "score": round(prob, 2), "source": "TiRGN"})
         return results
-

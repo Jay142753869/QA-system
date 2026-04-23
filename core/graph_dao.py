@@ -2,6 +2,8 @@ from neo4j import GraphDatabase
 import logging
 import csv
 import os
+import threading
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -11,11 +13,17 @@ class GraphDAO:
         self.driver = None
         self.local_csv_path = local_csv_path
         self._csv_cache = {}
+        self._index = None  # Pre-loaded CSV index
+        self._csv_data = None  # Pre-loaded CSV data
+        self._lock = threading.RLock()  # Thread-safe lock
+        
+        # Pre-load CSV data for fast query
+        if self.local_csv_path and os.path.exists(self.local_csv_path):
+            self._preload_csv()
         
         if not self.use_mock:
             try:
                 self.driver = GraphDatabase.driver(uri, auth=(user, password))
-                # Verify connection
                 self.driver.verify_connectivity()
                 logger.info("Connected to Neo4j database.")
             except Exception as e:
@@ -24,6 +32,30 @@ class GraphDAO:
         else:
             logger.info("GraphDAO initialized in Mock mode.")
 
+    def _preload_csv(self):
+        """Pre-load CSV data into memory and build index for O(1) lookup."""
+        try:
+            logger.info(f"Pre-loading CSV data from {self.local_csv_path}...")
+            
+            self._index = defaultdict(lambda: defaultdict(list))
+            self._csv_data = []
+            
+            with open(self.local_csv_path, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    self._csv_data.append(row)
+                    head = row.get('head', '')
+                    relation = row.get('relation', '')
+                    if head and relation:
+                        self._index[head][relation].append(row)
+            
+            logger.info(f"CSV pre-loaded: {len(self._csv_data)} rows, "
+                       f"{len(self._index)} unique heads indexed.")
+        except Exception as e:
+            logger.error(f"Failed to pre-load CSV: {e}")
+            self._index = None
+            self._csv_data = None
+
     def close(self):
         if self.driver:
             self.driver.close()
@@ -31,6 +63,7 @@ class GraphDAO:
     def query_entity_relation(self, entity, relation, time=None):
         """
         Query the graph for a specific relation of an entity, optionally filtered by time.
+        Uses pre-loaded index for O(1) lookup if available.
         """
         if self.driver:
             query = """
@@ -46,14 +79,57 @@ class GraphDAO:
                 logger.error(f"Cypher query failed: {e}")
                 return []
 
-        local = self._local_query(entity, relation, time)
-        if local:
-            return local
+        # Use indexed query if data is pre-loaded
+        if self._index is not None:
+            indexed_result = self._indexed_query(entity, relation, time)
+            if indexed_result:
+                return indexed_result
+        else:
+            # Fallback to old method
+            local = self._local_query(entity, relation, time)
+            if local:
+                return local
 
         if self.use_mock:
             return self._mock_query(entity, relation, time)
         
         return []
+
+    def _indexed_query(self, entity, relation, time):
+        """Fast O(1) lookup using pre-built index."""
+        with self._lock:  # Thread-safe access
+            rows = self._index.get(entity, {}).get(relation, [])
+            
+            if not rows:
+                return []
+            
+            time_prefix = self._normalize_time_prefix(time)
+            results = set()
+            best_time = None
+            
+            for row in rows:
+                row_time = row.get('time', '')
+                
+                if time_prefix:
+                    if len(time_prefix) == 8:
+                        if row_time != time_prefix:
+                            continue
+                    else:
+                        if not row_time.startswith(time_prefix):
+                            continue
+                
+                tail = row.get('tail')
+                if tail:
+                    if time_prefix and len(time_prefix) < 8:
+                        if best_time is None or row_time > best_time:
+                            best_time = row_time
+                            results = {tail}
+                        elif row_time == best_time:
+                            results.add(tail)
+                    else:
+                        results.add(tail)
+            
+            return sorted(results)
 
     def _normalize_time_prefix(self, time):
         if not time:
@@ -68,55 +144,57 @@ class GraphDAO:
         return None
 
     def _local_query(self, entity, relation, time):
+        """Fallback: Full CSV scan (slow, for when index is not available)."""
         if not self.local_csv_path or not os.path.exists(self.local_csv_path):
             return []
 
         time_prefix = self._normalize_time_prefix(time)
         cache_key = (str(entity), str(relation), time_prefix)
-        if cache_key in self._csv_cache:
-            return self._csv_cache[cache_key]
+        
+        with self._lock:
+            if cache_key in self._csv_cache:
+                return self._csv_cache[cache_key]
 
-        results = set()
-        best_time = None
-        try:
-            with open(self.local_csv_path, 'r', encoding='utf-8-sig') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    if row.get('head') != str(entity):
-                        continue
-                    if row.get('relation') != str(relation):
-                        continue
-                    row_time = row.get('time') or ''
-                    if time_prefix:
-                        if len(time_prefix) == 8:
-                            if row_time != time_prefix:
-                                continue
-                        else:
-                            if not row_time.startswith(time_prefix):
-                                continue
-                    tail = row.get('tail')
-                    if tail:
-                        if time_prefix and len(time_prefix) < 8:
-                            if best_time is None or row_time > best_time:
-                                best_time = row_time
-                                results = {tail}
-                            elif row_time == best_time:
+            results = set()
+            best_time = None
+            
+            try:
+                with open(self.local_csv_path, 'r', encoding='utf-8-sig') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get('head') != str(entity):
+                            continue
+                        if row.get('relation') != str(relation):
+                            continue
+                        row_time = row.get('time', '')
+                        if time_prefix:
+                            if len(time_prefix) == 8:
+                                if row_time != time_prefix:
+                                    continue
+                            else:
+                                if not row_time.startswith(time_prefix):
+                                    continue
+                        tail = row.get('tail')
+                        if tail:
+                            if time_prefix and len(time_prefix) < 8:
+                                if best_time is None or row_time > best_time:
+                                    best_time = row_time
+                                    results = {tail}
+                                elif row_time == best_time:
+                                    results.add(tail)
+                            else:
                                 results.add(tail)
-                        else:
-                            results.add(tail)
-        except Exception as e:
-            logger.error(f"Local CSV query failed: {e}")
-            self._csv_cache[cache_key] = []
-            return []
+            except Exception as e:
+                logger.error(f"Local CSV query failed: {e}")
+                self._csv_cache[cache_key] = []
+                return []
 
-        out = sorted(results)
-        self._csv_cache[cache_key] = out
-        return out
+            out = sorted(results)
+            self._csv_cache[cache_key] = out
+            return out
 
     def _mock_query(self, entity, relation, time):
-        """
-        Returns hardcoded data for demonstration.
-        """
+        """Returns hardcoded data for demonstration."""
         logger.info(f"Mock Query: {entity} - {relation} - {time}")
         
         # Scenario 1: Guizhou Moutai Independent Director

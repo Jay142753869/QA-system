@@ -15,7 +15,7 @@ class Config:
     NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD') or "password"
     
     # Model Configuration
-    # Set to False to use Real REGCN model
+    # False = 使用真实 BERT / REGCN / TiRGN
     USE_MOCK_MODELS = False
 
     # Graph Configuration

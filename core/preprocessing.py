@@ -5,6 +5,8 @@ import logging
 import numpy as np
 import os
 import re
+import hashlib
+import threading
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +20,14 @@ try:
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
     logger.warning("Transformers library not found. BERT model will run in mock mode.")
+
+
+def get_cfg(config, key, default=None):
+    if hasattr(config, 'get'):
+        val = config.get(key)
+        if val is not None:
+            return val
+    return getattr(config, key, default)
 
 class ACMatcher:
     """
@@ -66,30 +76,98 @@ class ACMatcher:
 class SimilarityModel:
     """
     Handles text embedding using BERT or a Mock fallback.
+    BERT model is loaded lazily (on first use) to speed up startup.
     """
     def __init__(self, model_name='bert-base-chinese', use_mock=True):
         self.use_mock = use_mock
+        self.model_name = model_name
         self.model = None
         self.tokenizer = None
+        self._bert_loaded = False
+        self._loading = False  # Prevent concurrent loading
         
-        if not use_mock and TRANSFORMERS_AVAILABLE:
-            try:
-                logger.info(f"Loading BERT model: {model_name}...")
-                self.tokenizer = BertTokenizer.from_pretrained(model_name)
-                self.model = BertModel.from_pretrained(model_name)
-                logger.info("BERT model loaded successfully.")
-            except Exception as e:
-                logger.warning(f"Failed to load BERT model '{model_name}': {e}. Falling back to mock mode.")
-                self.use_mock = True
-        else:
+        # Note: BERT is now loaded lazily in _ensure_bert_loaded()
+        if not use_mock and not TRANSFORMERS_AVAILABLE:
+            logger.warning("Transformers library not available. BERT will run in mock mode.")
             self.use_mock = True
+    
+    def _ensure_bert_loaded(self, timeout=30):
+        """
+        Lazy load BERT model with timeout.
+        Returns True if BERT is ready (or mock mode), False on timeout.
+        """
+        if self.use_mock:
+            return True
+        
+        if self._bert_loaded and self.model is not None:
+            return True
+        
+        # Prevent concurrent loading
+        if self._loading:
+            # Wait for other thread to finish
+            import time
+            waited = 0
+            while self._loading and waited < timeout:
+                time.sleep(0.1)
+                waited += 0.1
+            return self._bert_loaded
+        
+        self._loading = True
+        
+        def load_bert():
+            try:
+                logger.info(f"Loading BERT model: {self.model_name}...")
+                try:
+                    self.tokenizer = BertTokenizer.from_pretrained(self.model_name, local_files_only=True)
+                    self.model = BertModel.from_pretrained(self.model_name, local_files_only=True)
+                except Exception:
+                    logger.info("Local BERT not found, downloading...")
+                    self.tokenizer = BertTokenizer.from_pretrained(self.model_name)
+                    self.model = BertModel.from_pretrained(self.model_name)
+                logger.info("BERT model loaded successfully.")
+                self._bert_loaded = True
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to load BERT model '{self.model_name}': {e}. Falling back to mock mode.")
+                self.use_mock = True
+                self._bert_loaded = True  # Mark as loaded (in mock mode)
+                return True
+            finally:
+                self._loading = False
+        
+        # Run loading with timeout
+        import threading
+        result = []
+        
+        def target():
+            result.append(load_bert())
+        
+        thread = threading.Thread(target=target)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout)
+        
+        if thread.is_alive():
+            # Timeout
+            logger.error(f"BERT loading timed out after {timeout}s. Switching to mock mode.")
+            self._loading = False
+            self.use_mock = True
+            self._bert_loaded = True
+            return True  # Ready in mock mode
+        
+        return result[0] if result else True
             
     def encode(self, text):
         """Returns a vector representation of the text."""
-        if self.use_mock:
+        # Always ensure BERT is loaded before using (for non-mock mode)
+        if not self.use_mock:
+            self._ensure_bert_loaded(timeout=10)
+        
+        if self.use_mock or self.model is None or self.tokenizer is None:
             # Generate a deterministic pseudo-random vector based on text hash
-            # This ensures same text gets same vector in mock mode
-            seed = hash(text) % (2**32)
+            # This ensures same text gets same vector across process restarts.
+            digest = hashlib.sha1(text.encode('utf-8')).hexdigest()
+            seed = int(digest[:8], 16)
             rng = np.random.default_rng(seed)
             return rng.random(768) # Standard BERT size
         
@@ -105,14 +183,21 @@ class SimilarityModel:
 
     def encode_list(self, text_list):
         """Batch encode a list of texts."""
-        if self.use_mock:
+        if not self.use_mock:
+            self._ensure_bert_loaded(timeout=10)
+
+        if self.use_mock or self.model is None or self.tokenizer is None:
             return [self.encode(t) for t in text_list]
-        
+
         embeddings = []
-        # Process one by one for simplicity (or batch if needed)
-        # For small relation list (few hundreds), one by one is fine for initialization
-        for text in text_list:
-            embeddings.append(self.encode(text))
+        batch_size = 16
+        for i in range(0, len(text_list), batch_size):
+            batch = text_list[i:i+batch_size]
+            inputs = self.tokenizer(batch, return_tensors="pt", padding=True, truncation=True)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            batch_emb = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+            embeddings.extend([e for e in batch_emb])
         return embeddings
 
     def compute_similarity(self, query_emb, candidate_embs):
@@ -125,9 +210,13 @@ class SimilarityModel:
         
         # Normalize
         norm_q = np.linalg.norm(query_emb)
-        if norm_q == 0: return []
+        if norm_q == 0:
+            return np.array([], dtype=int), np.array([])
         query_emb = query_emb / norm_q
         
+        if candidate_embs is None or len(candidate_embs) == 0:
+            return np.array([], dtype=int), np.array([])
+
         candidate_matrix = np.array(candidate_embs)
         norm_c = np.linalg.norm(candidate_matrix, axis=1, keepdims=True)
         norm_c[norm_c == 0] = 1
@@ -148,7 +237,7 @@ class NLPProcessor:
     def __init__(self, config):
         self.config = config
         self.ac_matcher = ACMatcher()
-        self.sim_model = SimilarityModel(use_mock=config.get('USE_MOCK_MODELS', True))
+        self.sim_model = SimilarityModel(use_mock=get_cfg(config, 'USE_MOCK_MODELS', False))
         
         # Load initial knowledge base for AC Automaton
         # In a real scenario, this would load from Neo4j or a file
@@ -156,16 +245,24 @@ class NLPProcessor:
         
         # BERT Relation Extraction Setup
         self.relation_list = []
-        self.relation_embs = []
+        self.relation_embs = None
+        self._relation_embs_ready = False
+        self._relation_embs_cache_path = None
+        self._relation_embs_lock = threading.Lock()
         self._load_relations()
 
     def _load_relations(self):
-        """Load relations from relation2id.txt and compute their embeddings."""
-        rel_file = os.path.join(self.config.get('REGCN_DATA_DIR', ''), 'relation2id.txt')
+        """Load relation names and defer embedding computation until needed."""
+        rel_file = os.path.join(get_cfg(self.config, 'REGCN_DATA_DIR', ''), 'relation2id.txt')
         if not os.path.exists(rel_file):
             # Fallback path logic or hardcoded typical path
             rel_file = os.path.join(os.getcwd(), 'models', 'RE-GCN-master', 'data', '80STOCKS', 'relation2id.txt')
         
+        cache_dir = os.path.join(get_cfg(self.config, 'BASE_PATH', os.getcwd()), 'data', 'cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_key = None
+        cache_path = None
+
         if os.path.exists(rel_file):
             logger.info(f"Loading relations from {rel_file}...")
             with open(rel_file, 'r', encoding='utf-8') as f:
@@ -173,18 +270,56 @@ class NLPProcessor:
                     parts = line.strip().split('\t')
                     if len(parts) >= 1:
                         self.relation_list.append(parts[0])
-            
-            # Pre-compute embeddings
-            logger.info(f"Computing BERT embeddings for {len(self.relation_list)} relations...")
-            self.relation_embs = self.sim_model.encode_list(self.relation_list)
-            logger.info("Relation embeddings computed.")
+
+            rel_bytes = ("\n".join(self.relation_list)).encode("utf-8")
+            rel_hash = hashlib.sha1(rel_bytes).hexdigest()
+            cache_key = f"{self.sim_model.model_name}_{len(self.relation_list)}_{rel_hash}"
+            cache_path = os.path.join(cache_dir, f"relation_embs_{cache_key}.npz")
+            self._relation_embs_cache_path = cache_path
+            logger.info(f"Loaded {len(self.relation_list)} relations. Embeddings will be prepared lazily.")
         else:
             logger.warning("relation2id.txt not found. BERT Relation Extraction will be disabled.")
+
+    def _ensure_relation_embeddings(self):
+        """Compute or load cached relation embeddings on first real use."""
+        if self._relation_embs_ready:
+            return
+        with self._relation_embs_lock:
+            if self._relation_embs_ready:
+                return
+            if not self.relation_list:
+                self.relation_embs = np.array([])
+                self._relation_embs_ready = True
+                return
+
+            cache_path = self._relation_embs_cache_path
+            if not self.sim_model.use_mock and cache_path and os.path.exists(cache_path):
+                try:
+                    logger.info(f"Loading cached relation embeddings from {cache_path}...")
+                    loaded = np.load(cache_path)
+                    self.relation_embs = loaded['embs']
+                    self._relation_embs_ready = True
+                    logger.info("Cached relation embeddings loaded.")
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load cached embeddings: {e}. Recomputing...")
+
+            logger.info(f"Computing BERT embeddings for {len(self.relation_list)} relations...")
+            embs = self.sim_model.encode_list(self.relation_list)
+            self.relation_embs = np.array(embs)
+            self._relation_embs_ready = True
+            if not self.sim_model.use_mock and cache_path:
+                try:
+                    np.savez_compressed(cache_path, embs=self.relation_embs)
+                    logger.info(f"Relation embeddings cached to {cache_path}.")
+                except Exception as e:
+                    logger.warning(f"Failed to cache embeddings: {e}")
+            logger.info("Relation embeddings computed.")
         
     def _load_initial_data(self):
         """Load entities from entity2id.txt and relations from relation2id.txt"""
         # 1. Load entities from entity2id.txt
-        ent_file = os.path.join(self.config.get('REGCN_DATA_DIR', ''), 'entity2id.txt')
+        ent_file = os.path.join(get_cfg(self.config, 'REGCN_DATA_DIR', ''), 'entity2id.txt')
         if not os.path.exists(ent_file):
             # Fallback path
             ent_file = os.path.join(os.getcwd(), 'models', 'RE-GCN-master', 'data', '80STOCKS', 'entity2id.txt')
@@ -207,7 +342,7 @@ class NLPProcessor:
                 "陆金海", "姜国华", "郭田勇"
             ]
 
-        rel_file = os.path.join(self.config.get('REGCN_DATA_DIR', ''), 'relation2id.txt')
+        rel_file = os.path.join(get_cfg(self.config, 'REGCN_DATA_DIR', ''), 'relation2id.txt')
         if not os.path.exists(rel_file):
             rel_file = os.path.join(os.getcwd(), 'models', 'RE-GCN-master', 'data', '80STOCKS', 'relation2id.txt')
 
@@ -237,7 +372,7 @@ class NLPProcessor:
         logger.info(f"Analyzing query: {text}")
         
         # Initialize Quadruple
-        quadruple = {"h": None, "r": None, "t": None, "time": None}
+        quadruple = {"h": "", "r": "", "t": "", "time": ""}
         enriched_matches = []
         
         # 1. AC Automaton Match (Priority 1: Known Knowledge)
@@ -310,21 +445,23 @@ class NLPProcessor:
         for pattern in time_patterns:
             for m in re.finditer(pattern, text):
                 word = m.group()
+                
+                # Check if this overlaps with existing matches to avoid duplication
+                is_overlap = False
+                for existing in enriched_matches:
+                    if existing['start'] != -1 and not (m.end() - 1 < existing['start'] or m.start() > existing['end']):
+                        is_overlap = True
+                        break
+                        
+                if is_overlap:
+                    continue
+                    
                 # If we haven't found a time yet, or this is more specific, take it
                 if not quadruple['time']:
                     quadruple['time'] = word
                 elif word not in quadruple['time']: 
                     # Append if different (e.g. 2018年 5月)
                     quadruple['time'] += word
-                
-                # Check if this overlaps with existing matches to avoid duplication
-                is_new = True
-                for existing in enriched_matches:
-                    if existing['start'] == m.start() + 1: # AC index is 1-based in my wrapper? Wait, let's check wrapper
-                        # AC wrapper: start_index = end_index - len(value) + 1. So it is 0-based index if end_index is 0-based?
-                        # ahocorasick .iter() returns (end_index, value). end_index is 0-based index of the last character.
-                        # So if "abc" (012), end_index=2. start = 2 - 3 + 1 = 0. Correct.
-                        pass
                 
                 enriched_matches.append({
                     "word": word,
@@ -363,6 +500,7 @@ class NLPProcessor:
         
         # 5. BERT-based Relation Extraction (Fallback if no relation found)
         if not quadruple['r'] and self.relation_list:
+            self._ensure_relation_embeddings()
             # Extract "unknown" parts of the query to match against relations
             # Simple approach: remove detected entities and times
             remaining_text = text

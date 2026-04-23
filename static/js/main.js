@@ -1,29 +1,100 @@
-$(document).ready(function() {
-    let currentMode = 'internal';
+$(document).ready(function () {
+    let currentMode = "internal";
     const chatHistoryByMode = { internal: "", external: "" };
+    let systemReady = false;
+    const settings = {
+        internalMinScore: 0.05,
+        externalMinScore: 0.01,
+        topK: 5
+    };
 
-    // Sidebar Toggle
-    $("#menu-toggle").click(function(e) {
+    (function initLoadingOverlay() {
+        const disableTip = localStorage.getItem("disableStartupTip") === "1";
+
+        function hideOverlay() {
+            $("#loading-overlay").fadeOut(300);
+            if (!disableTip) {
+                showStartupTip();
+            }
+        }
+
+        $("#send-btn").prop("disabled", true);
+        $("#user-input").prop("disabled", true);
+
+        const startAt = Date.now();
+        const maxWaitMs = 120000;
+
+        function pollStatus() {
+            $.ajax({
+                url: "/api/status",
+                type: "GET",
+                success: function (resp) {
+                    if (resp && resp.loading === false && resp.ready === true) {
+                        systemReady = true;
+                        $("#send-btn").prop("disabled", false);
+                        $("#user-input").prop("disabled", false);
+                        $("#loading-text").text("系统已准备就绪");
+                        $("#loading-detail").text(resp.message || "模型加载完成，可以开始提问。");
+                        setTimeout(hideOverlay, 500);
+                        return;
+                    }
+
+                    systemReady = false;
+                    $("#send-btn").prop("disabled", true);
+                    $("#user-input").prop("disabled", true);
+                    $("#loading-detail").text((resp && resp.message) || "正在加载模型资源...");
+
+                    if (Date.now() - startAt > maxWaitMs) {
+                        if (resp && resp.loading === false && resp.ready === false) {
+                            $("#loading-text").text("系统初始化失败");
+                            $("#loading-detail").text(resp.message || "系统组件加载失败，请检查环境后重启。");
+                        } else {
+                            $("#loading-text").text("系统启动超时");
+                            $("#loading-detail").text("模型加载时间较长，请稍后再试。");
+                        }
+                        setTimeout(pollStatus, 2000);
+                        return;
+                    }
+
+                    setTimeout(pollStatus, 1000);
+                },
+                error: function () {
+                    $("#loading-detail").text("正在连接服务...");
+                    if (Date.now() - startAt > maxWaitMs) {
+                        $("#loading-text").text("无法连接到服务");
+                        $("#loading-detail").text("请稍后重试或重启程序。");
+                        setTimeout(pollStatus, 2000);
+                        return;
+                    }
+                    setTimeout(pollStatus, 1500);
+                }
+            });
+        }
+
+        pollStatus();
+    })();
+
+    $("#menu-toggle").click(function (e) {
         e.preventDefault();
         $("#wrapper").toggleClass("toggled");
     });
 
-    // Mode Switching
-    $("#btn-internal").click(function(e) {
+    $("#btn-internal").click(function (e) {
         e.preventDefault();
-        switchMode('internal');
+        switchMode("internal");
     });
 
-    $("#btn-external").click(function(e) {
+    $("#btn-external").click(function (e) {
         e.preventDefault();
-        switchMode('external');
+        switchMode("external");
     });
 
     function switchMode(mode) {
         chatHistoryByMode[currentMode] = $("#chat-box").html();
         currentMode = mode;
         $(".list-group-item").removeClass("active");
-        if (mode === 'internal') {
+
+        if (mode === "internal") {
             $("#btn-internal").addClass("active");
             $("#header-title").text("调用内推模型");
             $("#current-mode-text").text("内推");
@@ -35,60 +106,133 @@ $(document).ready(function() {
 
         $("#chat-box").html(chatHistoryByMode[currentMode] || "");
         if (!chatHistoryByMode[currentMode]) {
-            appendMessage('system', mode === 'internal' ? '已切换到内推模式。' : '已切换到外推模式。');
+            appendMessage("system", mode === "internal" ? "已切换到内推模式。" : "已切换到外推模式。");
         }
     }
 
-    // Send Message
+    $("#settings-btn").click(function () {
+        $("#setting-internal-threshold").val(settings.internalMinScore);
+        $("#setting-external-threshold").val(settings.externalMinScore);
+        $("#setting-topk").val(settings.topK);
+        $("#setting-disable-startup-tip").prop("checked", localStorage.getItem("disableStartupTip") === "1");
+
+        if (window.bootstrap && window.bootstrap.Modal) {
+            new bootstrap.Modal(document.getElementById("settingsModal")).show();
+        } else {
+            $("#settingsModal").modal("show");
+        }
+    });
+
+    $("#settings-save-btn").click(function () {
+        const internalVal = parseFloat($("#setting-internal-threshold").val());
+        const externalVal = parseFloat($("#setting-external-threshold").val());
+        const topKVal = parseInt($("#setting-topk").val(), 10);
+
+        if (!isNaN(internalVal) && internalVal >= 0 && internalVal <= 1) {
+            settings.internalMinScore = internalVal;
+        }
+        if (!isNaN(externalVal) && externalVal >= 0 && externalVal <= 1) {
+            settings.externalMinScore = externalVal;
+        }
+        if (!isNaN(topKVal) && topKVal > 0) {
+            settings.topK = topKVal;
+        }
+
+        localStorage.setItem("disableStartupTip", $("#setting-disable-startup-tip").is(":checked") ? "1" : "0");
+
+        if (window.bootstrap && window.bootstrap.Modal) {
+            const modalEl = document.getElementById("settingsModal");
+            const instance = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+            instance.hide();
+        } else if ($("#settingsModal").modal) {
+            $("#settingsModal").modal("hide");
+        }
+    });
+
+    function showStartupTip() {
+        if (window.bootstrap && window.bootstrap.Modal) {
+            new bootstrap.Modal(document.getElementById("startupTipModal")).show();
+        } else if ($("#startupTipModal").modal) {
+            $("#startupTipModal").modal("show");
+        }
+    }
+
     $("#send-btn").click(sendMessage);
-    $("#user-input").keypress(function(e) {
-        if (e.which == 13) sendMessage();
+    $("#user-input").keypress(function (e) {
+        if (e.which === 13) {
+            sendMessage();
+        }
     });
 
     function sendMessage() {
         const question = $("#user-input").val().trim();
-        if (!question) return;
+        if (!question) {
+            return;
+        }
+        if (!systemReady) {
+            appendMessage("system", "系统仍在加载模型，请稍后再提问。");
+            return;
+        }
 
-        // Add User Message
-        appendMessage('user', question);
-        $("#user-input").val('');
+        appendMessage("user", question);
+        $("#user-input").val("");
 
-        // Loading Indicator
-        const loadingId = 'loading-' + Date.now();
+        const loadingId = "loading-" + Date.now();
         appendLoading(loadingId);
 
-        // API Call
         $.ajax({
-            url: '/api/query',
-            type: 'POST',
-            contentType: 'application/json',
+            url: "/api/query",
+            type: "POST",
+            contentType: "application/json",
             data: JSON.stringify({
                 question: question,
-                mode: currentMode
+                mode: currentMode,
+                top_k: settings.topK
             }),
-            success: function(response) {
+            success: function (response) {
                 removeLoading(loadingId);
                 renderResponse(response);
             },
-            error: function(err) {
+            error: function (err) {
                 removeLoading(loadingId);
-                appendMessage('system', "抱歉，系统出现错误，请稍后再试。");
+                let msg = "抱歉，系统出现错误，请稍后再试。";
+                try {
+                    const resp = err && err.responseJSON ? err.responseJSON : null;
+                    if (resp && (resp.message || resp.error)) {
+                        msg = resp.message || resp.error;
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+                appendMessage("system", msg);
                 console.error(err);
             }
         });
     }
 
+    function escapeHtml(value) {
+        return String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
+
     function appendMessage(sender, text) {
-        const typeClass = sender === 'user' ? 'user-message' : 'system-message';
-        const icon = sender === 'user' ? '<i class="fas fa-user text-secondary ms-2"></i>' : '<i class="fas fa-robot text-primary me-2"></i>';
-        
+        const typeClass = sender === "user" ? "user-message" : "system-message";
+        const icon = sender === "user"
+            ? '<i class="fas fa-user text-secondary ms-2"></i>'
+            : '<i class="fas fa-robot text-primary me-2"></i>';
+        const safeText = escapeHtml(text || "");
+
         const html = `
             <div class="chat-message ${typeClass}">
                 <div class="card border-0 shadow-sm">
                     <div class="card-body py-2 px-3">
-                        ${sender === 'system' ? icon : ''}
-                        ${text}
-                        ${sender === 'user' ? icon : ''}
+                        ${sender === "system" ? icon : ""}
+                        ${safeText}
+                        ${sender === "user" ? icon : ""}
                     </div>
                 </div>
             </div>
@@ -120,9 +264,8 @@ $(document).ready(function() {
     }
 
     function renderResponse(data) {
-        let content = '';
+        let content = "";
 
-        // 1. NLP Analysis Info (Visualized)
         if (data.analysis) {
             content += `<div class="mb-3">
                 <div class="d-flex align-items-center mb-2">
@@ -131,14 +274,12 @@ $(document).ready(function() {
                 </div>
                 <div class="card bg-light border-0">
                     <div class="card-body p-2" style="font-size: 0.9em;">
-                        <!-- Segmentation & Entities -->
                         <div class="mb-2">
-                            <small class="text-muted d-block mb-1">文本分词与实体识别:</small>
+                            <small class="text-muted d-block mb-1">文本分词与实体识别</small>
                             ${renderSegmentation(data.analysis)}
                         </div>
-                        <!-- Structured Query -->
                         <div>
-                            <small class="text-muted d-block mb-1">解析意图 (四元组):</small>
+                            <small class="text-muted d-block mb-1">解析意图（四元组）</small>
                             ${renderStructuredQuery(data.analysis.structured_query)}
                         </div>
                     </div>
@@ -146,47 +287,52 @@ $(document).ready(function() {
             </div>`;
         }
 
-        // 2. Graph Result
-        const graphTitle = currentMode === 'internal' ? '知识库查询结果' : '知识库参考（对比）';
+        const graphTitle = currentMode === "internal" ? "知识库查询结果" : "知识库参考结果（用于对比）";
         content += `<strong><i class="fas fa-database text-success"></i> ${graphTitle}:</strong><br>`;
         if (data.graph_result && data.graph_result.length > 0) {
-            content += `<div class="alert alert-success mt-2">${data.graph_result.join(', ')}</div>`;
+            const safeGraphResult = data.graph_result.map(function (item) {
+                return escapeHtml(item);
+            }).join(", ");
+            content += `<div class="alert alert-success mt-2">${safeGraphResult}</div>`;
         } else {
-            const msg = data.graph_message || "暂无数据";
-            content += `<div class="alert alert-light border mt-2">${msg}</div>`;
+            content += `<div class="alert alert-light border mt-2">${escapeHtml(data.graph_message || "暂无数据")}</div>`;
         }
 
-        // 3. Reasoning Result
         if (data.reasoning_result && data.reasoning_result.length > 0) {
-            const title = currentMode === 'internal' ? "内推模型预测结果 (Top 5)" : "TiRGN 外推预测结果 (Top 5)";
+            const title = currentMode === "internal"
+                ? `内推模型预测结果（Top ${settings.topK}）`
+                : `TiRGN 外推预测结果（Top ${settings.topK}）`;
             content += `<div class="mt-3"><strong><i class="fas fa-brain text-info"></i> ${title}:</strong></div>`;
-            
-            content += `<div class="list-group mt-2">`;
-            const minScore = currentMode === 'internal' ? 0.05 : 0.01;
-            const filtered = data.reasoning_result.filter(item => {
-                const s = item.score ?? item.probability;
-                if (typeof s === 'number') return s >= minScore;
-                return true;
+            content += '<div class="list-group mt-2">';
+
+            const minScore = currentMode === "internal" ? settings.internalMinScore : settings.externalMinScore;
+            const filtered = data.reasoning_result.filter(function (item) {
+                const score = item.score ?? item.probability;
+                return typeof score === "number" ? score >= minScore : true;
             });
-            if (filtered.length === 0) {
-                content += `<div class="list-group-item text-muted">无满足阈值 (${minScore}) 的预测结果</div>`;
+            const topLimit = settings.topK > 0 ? settings.topK : filtered.length;
+            const limited = filtered.slice(0, topLimit);
+
+            if (limited.length === 0) {
+                content += `<div class="list-group-item text-muted">没有满足阈值 ${escapeHtml(minScore)} 的预测结果。</div>`;
             } else {
-                filtered.forEach((item, index) => {
-                    const badgeClass = index === 0 ? 'bg-danger' : 'bg-secondary';
+                limited.forEach(function (item, index) {
+                    const badgeClass = index === 0 ? "bg-danger" : "bg-secondary";
                     const rawScore = item.score ?? item.probability;
-                    const scoreText = typeof rawScore === 'number' ? rawScore.toFixed(2) : rawScore;
+                    const scoreText = typeof rawScore === "number" ? rawScore.toFixed(2) : String(rawScore ?? "");
+                    const answerName = escapeHtml(item.name || item.prediction || "");
                     content += `
                         <div class="list-group-item d-flex justify-content-between align-items-center">
-                            <div>${item.name || item.prediction}</div>
-                            <span class="badge ${badgeClass} rounded-pill">${scoreText}</span>
+                            <div class="answer-name">${answerName}</div>
+                            <span class="badge ${badgeClass} rounded-pill">${escapeHtml(scoreText)}</span>
                         </div>
                     `;
                 });
             }
-            content += `</div>`;
+
+            content += "</div>";
         }
 
-        // Wrap in system message
         const html = `
             <div class="chat-message system-message">
                 <div class="card border-0 shadow-sm">
@@ -202,37 +348,42 @@ $(document).ready(function() {
     }
 
     function renderSegmentation(analysis) {
-        // Create a map of tokens to types based on AC matches
-        // This is a simple visualization strategy
-        let html = '';
+        let html = "";
         const matches = analysis.ac_matches || [];
-        
-        // Use segmentation result but highlight known entities
-        analysis.segmentation.forEach(seg => {
-            let badgeClass = 'bg-secondary bg-opacity-10 text-dark'; // default
-            let title = seg.flag;
-            
-            // Check if this word was matched by AC Automaton
-            const match = matches.find(m => m.word === seg.word);
+
+        (analysis.segmentation || []).forEach(function (seg) {
+            let badgeClass = "bg-secondary bg-opacity-10 text-dark";
+            const title = escapeHtml(seg.flag || "");
+            const match = matches.find(function (item) {
+                return item.word === seg.word;
+            });
+
             if (match) {
-                if (match.type === 'ENTITY') badgeClass = 'bg-primary text-white';
-                else if (match.type === 'RELATION') badgeClass = 'bg-success text-white';
-                else if (match.type === 'TIME') badgeClass = 'bg-info text-white';
+                if (match.type === "ENTITY") {
+                    badgeClass = "bg-primary text-white";
+                } else if (match.type === "RELATION") {
+                    badgeClass = "bg-success text-white";
+                } else if (match.type === "TIME") {
+                    badgeClass = "bg-info text-white";
+                }
             }
-            
-            html += `<span class="badge ${badgeClass} me-1 mb-1" title="${title}">${seg.word}</span>`;
+
+            html += `<span class="badge ${badgeClass} me-1 mb-1" title="${title}">${escapeHtml(seg.word)}</span>`;
         });
+
         return html;
     }
 
     function renderStructuredQuery(q) {
-        if (!q) return '<span class="text-muted">无法解析</span>';
-        
-        const h = q.h ? `<span class="badge bg-primary">${q.h}</span>` : '<span class="text-muted">?</span>';
-        const r = q.r ? `<span class="badge bg-success">${q.r}</span>` : '<span class="text-muted">?</span>';
-        const t = q.t ? `<span class="badge bg-primary">${q.t}</span>` : '<span class="text-muted">?</span>';
-        const time = q.time ? `<span class="badge bg-info">${q.time}</span>` : '<span class="text-muted">?</span>';
-        
+        if (!q) {
+            return '<span class="text-muted">无法解析</span>';
+        }
+
+        const h = q.h ? `<span class="badge bg-primary">${escapeHtml(q.h)}</span>` : '<span class="text-muted">?</span>';
+        const r = q.r ? `<span class="badge bg-success">${escapeHtml(q.r)}</span>` : '<span class="text-muted">?</span>';
+        const t = q.t ? `<span class="badge bg-primary">${escapeHtml(q.t)}</span>` : '<span class="text-muted">?</span>';
+        const time = q.time ? `<span class="badge bg-info">${escapeHtml(q.time)}</span>` : '<span class="text-muted">?</span>';
+
         return `
             <div class="d-flex align-items-center gap-2">
                 <span>(</span>

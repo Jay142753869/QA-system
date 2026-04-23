@@ -1,39 +1,57 @@
-import webview
+import ctypes
+import os
 import sys
 import threading
 import time
-import os
-from app import app
+import webbrowser
 
-# Ensure templates/static are found when frozen
-if getattr(sys, 'frozen', False):
-    template_folder = os.path.join(sys._MEIPASS, 'templates')
-    static_folder = os.path.join(sys._MEIPASS, 'static')
-    app.template_folder = template_folder
-    app.static_folder = static_folder
+import webview
+
 
 def start_server():
-    # Run Flask app
-    # Note: init_system is now handled asynchronously in app.py
+    """Start the Flask server used by the desktop shell."""
+    from app import app
+
+    if getattr(sys, "frozen", False):
+        template_folder = os.path.join(sys._MEIPASS, "templates")
+        static_folder = os.path.join(sys._MEIPASS, "static")
+        app.template_folder = template_folder
+        app.static_folder = static_folder
+
     app.run(port=5000, use_reloader=False)
 
+
 def main():
-    # Start Flask in a separate thread
-    t = threading.Thread(target=start_server)
-    t.daemon = True
-    t.start()
+    """Launch the desktop wrapper and fall back to the browser if needed."""
+    server_thread = threading.Thread(target=start_server, daemon=True)
+    server_thread.start()
 
-    # Create the window
-    webview.create_window(
-        "金融事件问答系统", 
-        "http://127.0.0.1:5000",
-        width=1200,
-        height=800,
-        resizable=True
-    )
-    
-    # Start the GUI loop
-    webview.start()
+    try:
+        webview.create_window(
+            "金融事件问答系统",
+            "http://127.0.0.1:5000",
+            width=1200,
+            height=800,
+            resizable=True,
+            text_select=True,
+        )
+        webview.start()
+    except Exception as exc:
+        url = "http://127.0.0.1:5000"
+        time.sleep(3)
+        webbrowser.open(url)
 
-if __name__ == '__main__':
+        msg = (
+            "内嵌窗口启动失败，已自动在浏览器中打开系统页面。\n\n"
+            f"错误信息: {exc}\n\n"
+            "请保持此提示框不要关闭，否则后台服务可能会停止。\n"
+            f"浏览器访问地址: {url}"
+        )
+        ctypes.windll.user32.MessageBoxW(None, msg, "金融事件问答系统", 0x00000040)
+
+        while True:
+            time.sleep(1)
+
+
+if __name__ == "__main__":
     main()

@@ -9,6 +9,10 @@ from types import SimpleNamespace
 logger = logging.getLogger(__name__)
 
 class REGCNWrapper:
+    RELATION_ALIASES = {
+        "独董": "独立董事",
+    }
+
     def __init__(self, config):
         self.config = config
         self.regcn_base_dir = config['REGCN_BASE_DIR']
@@ -109,6 +113,8 @@ class REGCNWrapper:
         if len(self.train_data) > 0: all_data.append(self.train_data)
         if len(self.valid_data) > 0: all_data.append(self.valid_data)
         if len(self.test_data) > 0: all_data.append(self.test_data)
+        if not all_data:
+            raise RuntimeError(f"REGCN dataset is empty under {self.data_dir}")
         self.all_data = np.concatenate(all_data)
         
         # Sort by time
@@ -128,26 +134,13 @@ class REGCNWrapper:
         self.snapshots = self.utils.split_by_time(self.all_data)
         # Map time_id to snapshot index
         self.time_to_snap_idx = {}
+        start_idx = 0
         for idx, snap in enumerate(self.snapshots):
-            # Assumes all triples in a snapshot have the same time
-            # Check the first triple's time
-            # Note: split_by_time returns [s, r, o] only (stripped time), 
-            # but we need to know which time corresponds to which snapshot.
-            # Let's rewrite split_by_time logic slightly or map it back.
-            
-            # Actually, split_by_time in utils.py relies on the data being sorted by time.
-            # And it returns list of numpy arrays of (s, r, o).
-            # We can reconstruct the time mapping.
-            # The all_data is sorted.
-            start_idx = 0
-            for i, snap in enumerate(self.snapshots):
-                # Get the time from the original data corresponding to this snapshot
-                # Length of snap
-                length = len(snap)
-                # The time of this block in all_data
-                t = self.all_data[start_idx][3]
-                self.time_to_snap_idx[t] = i
-                start_idx += length
+            # split_by_time keeps the original ordering, so we can map each
+            # snapshot back to the time column of the first row in that block.
+            t = int(self.all_data[start_idx][3])
+            self.time_to_snap_idx[t] = idx
+            start_idx += len(snap)
                 
         logger.info(f"Data loaded. Nodes: {self.num_nodes}, Rels: {self.num_rels}, Snapshots: {len(self.snapshots)}")
 
@@ -197,34 +190,50 @@ class REGCNWrapper:
         self.model.eval()
         logger.info("REGCN model loaded successfully.")
 
+    def _latest_time_id(self):
+        """Return the latest time id available in the loaded dataset."""
+        return int(self.all_data[-1][3])
+
+    def _resolve_prediction_time_id(self, time_str):
+        """
+        Resolve prediction time safely.
+
+        If the user did not provide a time, we fall back to the latest snapshot.
+        If a time was provided but cannot be resolved, return an error message
+        instead of silently switching to an unrelated timestamp.
+        """
+        if not time_str:
+            return self._latest_time_id(), None
+
+        t_id = self._resolve_time_id(time_str)
+        if t_id is None:
+            return None, f"Unknown or unsupported time: {time_str}"
+        return t_id, None
+
     def predict(self, head_name, relation_name, time_str=None, top_k=5):
         """
         Predict tail entities given (head, relation, time).
         """
         # 1. Map inputs to IDs
         h_id = self.entity2id.get(head_name)
-        r_id = self.relation2id.get(relation_name)
+        resolved_relation = self._resolve_relation_name(relation_name)
+        r_id = self.relation2id.get(resolved_relation) if resolved_relation else None
         
         if h_id is None:
             return [{"name": f"Unknown entity: {head_name}", "score": 0.0, "source": "Input Error"}]
         if r_id is None:
-            return [{"name": f"Unknown relation: {relation_name}", "score": 0.0, "source": "Input Error"}]
+            logger.warning(f"REGCN relation not supported for reasoning: {relation_name}")
+            return []
             
         # Time handling
         # If time_str is provided, map to ID. 
         # If no time provided, use the latest time in dataset? Or specific logic?
         # The CSV used 20250101 -> ID 0.
         # If input is '20250102', we need to find its ID.
-        t_id = self._resolve_time_id(time_str)
-        
-        if t_id is None:
-            # Default to latest time or 0 if user didn't specify
-            # But wait, 0 is the START. We probably want to predict for the future?
-            # Or if it's a historical query, use that time.
-            # If unknown time, we can't easily position it in history.
-            # Let's fallback to the last timestamp in data if not found.
-            t_id = self.all_data[-1][3]
-            logger.warning(f"Time {time_str} not found or not provided. Using last available time ID: {t_id}")
+        t_id, time_error = self._resolve_prediction_time_id(time_str)
+        if time_error:
+            logger.warning(time_error)
+            return [{"name": time_error, "score": 0.0, "source": "Input Error"}]
 
         # 1.5 EXACT MATCH RETRIEVAL (Moved to separate method)
         # We do NOT return DB results here anymore, to keep 'predict' pure for reasoning.
@@ -290,15 +299,17 @@ class REGCNWrapper:
         # 2. Use Softmax across the whole vocabulary (or at least top K) to make them compete.
         
         scores_tensor = torch.from_numpy(scores)
-        probs = torch.softmax(scores_tensor, dim=0).numpy()
         
-        top_indices = probs.argsort()[-top_k:][::-1]
+        # Apply Top-K Local Softmax Re-normalization
+        top_k_vals, top_k_indices = torch.topk(scores_tensor, min(top_k, len(scores_tensor)))
+        top_probs = torch.softmax(top_k_vals, dim=0).numpy()
+        top_indices = top_k_indices.numpy()
         
         model_results = []
-        for idx in top_indices:
-            prob = float(probs[idx])
-            # Filter low probability results
-            if prob < 0.05:
+        for i, idx in enumerate(top_indices):
+            prob = float(top_probs[i])
+            # Filter extremely low probability results
+            if prob < 0.01:
                 continue
             
             ent_name = self.id2entity.get(idx, f"Unknown ID {idx}")
@@ -328,6 +339,23 @@ class REGCNWrapper:
         best = max(candidates)
         return self.time2id.get(best)
 
+    def _resolve_relation_name(self, relation_name):
+        """Map user-facing relation aliases to model-supported relation names."""
+        relation_name = (relation_name or "").strip()
+        if not relation_name:
+            return None
+        if relation_name in self.relation2id:
+            return relation_name
+
+        alias_target = self.RELATION_ALIASES.get(relation_name)
+        if alias_target and alias_target in self.relation2id:
+            return alias_target
+
+        candidates = [name for name in self.relation2id if relation_name in name]
+        if candidates:
+            return min(candidates, key=len)
+        return None
+
     def get_fact(self, head_name, relation_name, time_str=None):
         """
         Retrieve exact fact from internal KG index.
@@ -340,7 +368,7 @@ class REGCNWrapper:
             return []
             
         t_id = self._resolve_time_id(time_str)
-            
+
         if t_id is None:
             return []
              
