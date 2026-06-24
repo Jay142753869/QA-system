@@ -307,6 +307,11 @@ $(document).ready(function () {
 
             const minScore = currentMode === "internal" ? settings.internalMinScore : settings.externalMinScore;
             const filtered = data.reasoning_result.filter(function (item) {
+                // Error results must always be shown, regardless of score threshold.
+                var src = (item.source || "").toLowerCase();
+                if (src.indexOf("error") !== -1) {
+                    return true;
+                }
                 const score = item.score ?? item.probability;
                 return typeof score === "number" ? score >= minScore : true;
             });

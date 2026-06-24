@@ -84,7 +84,10 @@ class SimilarityModel:
         self.model = None
         self.tokenizer = None
         self._bert_loaded = False
-        self._loading = False  # Prevent concurrent loading
+        self._lock = threading.Lock()
+        self._load_event = threading.Event()
+        self._load_event.set()  # Initially "no load in progress"
+        self._load_generation = 0  # Invalidates stale background loads
         
         # Note: BERT is now loaded lazily in _ensure_bert_loaded()
         if not use_mock and not TRANSFORMERS_AVAILABLE:
@@ -95,75 +98,111 @@ class SimilarityModel:
         """
         Lazy load BERT model with timeout.
         Returns True if BERT is ready (or mock mode), False on timeout.
+
+        Uses a Lock + Event + generation-token pattern so that:
+        - Only one background load runs at a time.
+        - Callers waiting on the Event are released atomically when
+          the background thread commits its result.
+        - A stale background thread (superseded by a newer load) cannot
+          overwrite a model that is already in use.
+        - ``encode()`` never sees a half-loaded tokenizer/model pair
+          because both are committed together under the lock.
         """
         if self.use_mock:
             return True
         
-        if self._bert_loaded and self.model is not None:
+        with self._lock:
+            if self._bert_loaded:
+                # Already resolved (success or fallback to mock).
+                return True
+            if not self._load_event.is_set():
+                # A load is already in progress; just wait for it.
+                pass
+            else:
+                # Start a new background load.
+                self._load_event.clear()
+                self._load_generation += 1
+                my_generation = self._load_generation
+                t = threading.Thread(
+                    target=self._load_bert_worker,
+                    args=(my_generation,),
+                    daemon=True,
+                )
+                t.start()
+
+        # Wait (outside the lock) for the background thread to finish.
+        completed = self._load_event.wait(timeout=timeout)
+
+        if not completed:
+            # Timeout — switch to mock so callers are not blocked, but
+            # let the background thread finish and restore real mode if
+            # it eventually succeeds.
+            with self._lock:
+                if not self._bert_loaded:
+                    logger.error(
+                        "BERT loading timed out after %ds. "
+                        "Switching to mock mode temporarily.", timeout
+                    )
+                    self.use_mock = True
+                    self._bert_loaded = True
             return True
-        
-        # Prevent concurrent loading
-        if self._loading:
-            # Wait for other thread to finish
-            import time
-            waited = 0
-            while self._loading and waited < timeout:
-                time.sleep(0.1)
-                waited += 0.1
-            return self._bert_loaded
-        
-        self._loading = True
-        
-        def load_bert():
+
+        return self._bert_loaded
+
+    def _load_bert_worker(self, generation):
+        """Background thread that downloads/loads BERT and commits the result."""
+        try:
+            logger.info("Loading BERT model: %s ...", self.model_name)
             try:
-                logger.info(f"Loading BERT model: {self.model_name}...")
-                try:
-                    self.tokenizer = BertTokenizer.from_pretrained(self.model_name, local_files_only=True)
-                    self.model = BertModel.from_pretrained(self.model_name, local_files_only=True)
-                except Exception:
-                    logger.info("Local BERT not found, downloading...")
-                    self.tokenizer = BertTokenizer.from_pretrained(self.model_name)
-                    self.model = BertModel.from_pretrained(self.model_name)
-                logger.info("BERT model loaded successfully.")
+                tokenizer = BertTokenizer.from_pretrained(
+                    self.model_name, local_files_only=True
+                )
+                model = BertModel.from_pretrained(
+                    self.model_name, local_files_only=True
+                )
+            except Exception:
+                logger.info("Local BERT not found, downloading...")
+                tokenizer = BertTokenizer.from_pretrained(self.model_name)
+                model = BertModel.from_pretrained(self.model_name)
+            logger.info("BERT model loaded successfully.")
+
+            with self._lock:
+                # Only commit if our generation is still current.
+                if generation != self._load_generation:
+                    logger.info(
+                        "BERT load finished but generation is stale (%d != %d), discarding.",
+                        generation, self._load_generation,
+                    )
+                    return
+                self.tokenizer = tokenizer
+                self.model = model
+                self.use_mock = False
                 self._bert_loaded = True
-                return True
-            except Exception as e:
-                logger.warning(f"Failed to load BERT model '{self.model_name}': {e}. Falling back to mock mode.")
-                self.use_mock = True
-                self._bert_loaded = True  # Mark as loaded (in mock mode)
-                return True
-            finally:
-                self._loading = False
-        
-        # Run loading with timeout
-        import threading
-        result = []
-        
-        def target():
-            result.append(load_bert())
-        
-        thread = threading.Thread(target=target)
-        thread.daemon = True
-        thread.start()
-        thread.join(timeout)
-        
-        if thread.is_alive():
-            # Timeout
-            logger.error(f"BERT loading timed out after {timeout}s. Switching to mock mode.")
-            self._loading = False
-            self.use_mock = True
-            self._bert_loaded = True
-            return True  # Ready in mock mode
-        
-        return result[0] if result else True
+        except Exception as e:
+            logger.warning(
+                "Failed to load BERT model '%s': %s. Falling back to mock mode.",
+                self.model_name, e,
+            )
+            with self._lock:
+                if generation == self._load_generation:
+                    self.use_mock = True
+                    self._bert_loaded = True
+        finally:
+            self._load_event.set()
             
+    def _get_model_snapshot(self):
+        """Return a consistent (use_mock, model, tokenizer) snapshot under lock."""
+        with self._lock:
+            return self.use_mock, self.model, self.tokenizer
+
     def encode(self, text):
         """Returns a vector representation of the text."""
         # Always ensure BERT is loaded before using (for non-mock mode)
         if not self.use_mock:
             self._ensure_bert_loaded(timeout=10)
-        
-        if self.use_mock or self.model is None or self.tokenizer is None:
+
+        use_mock, model, tokenizer = self._get_model_snapshot()
+        if use_mock or model is None or tokenizer is None:
             # Generate a deterministic pseudo-random vector based on text hash
             # This ensures same text gets same vector across process restarts.
             digest = hashlib.sha1(text.encode('utf-8')).hexdigest()
@@ -172,9 +211,9 @@ class SimilarityModel:
             return rng.random(768) # Standard BERT size
         
         try:
-            inputs = self.tokenizer(text, return_tensors="pt")
+            inputs = tokenizer(text, return_tensors="pt")
             with torch.no_grad():
-                outputs = self.model(**inputs)
+                outputs = model(**inputs)
             # Use CLS token or mean pooling
             return outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
         except Exception as e:
@@ -186,16 +225,17 @@ class SimilarityModel:
         if not self.use_mock:
             self._ensure_bert_loaded(timeout=10)
 
-        if self.use_mock or self.model is None or self.tokenizer is None:
+        use_mock, model, tokenizer = self._get_model_snapshot()
+        if use_mock or model is None or tokenizer is None:
             return [self.encode(t) for t in text_list]
 
         embeddings = []
         batch_size = 16
         for i in range(0, len(text_list), batch_size):
             batch = text_list[i:i+batch_size]
-            inputs = self.tokenizer(batch, return_tensors="pt", padding=True, truncation=True)
+            inputs = tokenizer(batch, return_tensors="pt", padding=True, truncation=True)
             with torch.no_grad():
-                outputs = self.model(**inputs)
+                outputs = model(**inputs)
             batch_emb = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
             embeddings.extend([e for e in batch_emb])
         return embeddings
@@ -516,26 +556,39 @@ class NLPProcessor:
             if remaining_text:
                 logger.info(f"Attempting BERT matching for relation using text: '{remaining_text}'")
                 query_emb = self.sim_model.encode(remaining_text)
-                
+
                 # Check cache logic could go here, but compute_similarity is fast for 237 items
                 indices, scores = self.sim_model.compute_similarity(query_emb, self.relation_embs)
-                
+
                 if len(indices) > 0:
                     top_idx = indices[0]
                     top_score = scores[0]
+                    second_score = scores[1] if len(scores) > 1 else 0.0
                     top_rel = self.relation_list[top_idx]
-                    
-                    logger.info(f"BERT Top match: {top_rel} (score: {top_score:.4f})")
-                    
-                    # Threshold check (e.g., 0.6)
-                    if top_score > 0.6: # Adjust this threshold as needed
+
+                    logger.info(f"BERT Top match: {top_rel} (score: {top_score:.4f}, margin: {top_score - second_score:.4f})")
+
+                    # Stricter matching to avoid false positives:
+                    # 1. High absolute threshold (0.85)
+                    # 2. Top-1/Top-2 margin must be significant (>= 0.1) to avoid
+                    #    ambiguous matches where multiple relations are equally similar
+                    # 3. Blacklist of non-relation terms that should never be matched
+                    RELATION_BLACKLIST = {"首席厨师", "厨师", "保洁", "保安"}
+                    if remaining_text in RELATION_BLACKLIST:
+                        logger.info(f"BERT match skipped: '{remaining_text}' is blacklisted")
+                    elif top_score >= 0.85 and (top_score - second_score) >= 0.1:
                         quadruple['r'] = top_rel
                         enriched_matches.append({
-                            "word": remaining_text, # Or the matched relation name? Let's show the matched part
-                            "start": -1, # Hard to map back exactly without alignment
+                            "word": remaining_text,
+                            "start": -1,
                             "end": -1,
                             "type": f"RELATION (BERT: {top_rel})"
                         })
+                    else:
+                        logger.info(
+                            f"BERT match rejected: score={top_score:.4f} < 0.85 or "
+                            f"margin={top_score - second_score:.4f} < 0.1"
+                        )
         
         return {
             "original_text": text,

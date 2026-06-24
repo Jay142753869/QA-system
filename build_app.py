@@ -3,10 +3,26 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 APP_VERSION = "v0.0.9"
 RELEASE_DIR = "release"
 RELEASE_FILENAME = f"FinancialQA-{APP_VERSION}-win-x64.zip"
+REQUIRED_RUNTIME_PATHS = [
+    "templates/index.html",
+    "static/vendor/css/bootstrap.min.css",
+    "static/vendor/js/bootstrap.bundle.min.js",
+    "models/RE-GCN-master/data/80STOCKS/entity2id.txt",
+    "models/RE-GCN-master/data/80STOCKS/relation2id.txt",
+    "models/RE-GCN-master/data/80STOCKS/time2id.txt",
+    "models/RE-GCN-master/data/80STOCKS/80stocks_quadruples.csv",
+    "models/RE-GCN-master/models/80STOCKS-uvrgcn-convtranse-ly2-dilate1-his3-weight_0.5-discount_1.0-angle_10-dp0.2_0.2_0.2_0.2-gpu0",
+    "models/TiRGN-main/data/80STOCKS/entity2id.txt",
+    "models/TiRGN-main/data/80STOCKS/relation2id.txt",
+    "models/TiRGN-main/data/80STOCKS/time2id.txt",
+    "models/TiRGN-main/data/80STOCKS/history",
+    "models/TiRGN-main/models/gl_rate_0.3-80STOCKS-convgcn-timeconvtranse-ly2-dilate1-his9-weight_0.5-discount_1.0-angle_14-dp0.2_0.2_0.2_0.2-gpu0-checkpoint",
+]
 
 
 def clean_build():
@@ -34,11 +50,24 @@ def ensure_build_dependencies():
     return True
 
 
+def ensure_runtime_assets():
+    """Validate files that must be bundled for the desktop exe to run alone."""
+    missing = [path for path in REQUIRED_RUNTIME_PATHS if not Path(path).exists()]
+    if missing:
+        print("缺少独立运行所需资源，无法打包 exe:")
+        for path in missing:
+            print(f"  - {path}")
+        return False
+    return True
+
+
 def build_app():
     """Run PyInstaller with the existing spec file."""
     print("开始执行 PyInstaller 打包...")
     cmd = [sys.executable, "-m", "PyInstaller", "FinancialQA.spec", "--clean", "--noconfirm"]
-    result = subprocess.run(cmd, check=False)
+    env = os.environ.copy()
+    env["PYTHONNOUSERSITE"] = "1"
+    result = subprocess.run(cmd, check=False, env=env)
     if result.returncode != 0:
         print(f"打包失败，返回码: {result.returncode}")
         return False
@@ -78,6 +107,9 @@ def main():
     print("=" * 60)
 
     if not ensure_build_dependencies():
+        sys.exit(1)
+
+    if not ensure_runtime_assets():
         sys.exit(1)
 
     if not os.path.exists("FinancialQA.spec"):

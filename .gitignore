@@ -30,6 +30,7 @@ ENV/
 # PyInstaller
 *.manifest
 *.spec
+!FinancialQA.spec
 
 # IDE
 .vscode/

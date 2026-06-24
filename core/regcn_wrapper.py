@@ -1,9 +1,10 @@
-import sys
 import os
 import torch
 import numpy as np
 import logging
 from types import SimpleNamespace
+
+from core.model_imports import isolated_model_import
 
 # Configure Logging
 logger = logging.getLogger(__name__)
@@ -20,22 +21,20 @@ class REGCNWrapper:
         self.model_path = config['REGCN_MODEL_PATH']
         self.data_dir = config['REGCN_DATA_DIR']
         self.params = config['REGCN_PARAMS']
-        
-        # Add REGCN to sys.path
-        if self.regcn_base_dir not in sys.path:
-            sys.path.append(self.regcn_base_dir)
-            
-        # Import REGCN modules here to avoid top-level import errors
+
+        # Import REGCN modules in an isolated context to avoid cross-
+        # contamination with TiRGN's identically-named packages.
         try:
-            from src.rrgcn import RecurrentRGCN
-            from rgcn import utils
-            from rgcn.utils import build_sub_graph
-            self.RecurrentRGCN = RecurrentRGCN
-            self.utils = utils
-            self.build_sub_graph = build_sub_graph
+            with isolated_model_import(self.regcn_base_dir):
+                from src.rrgcn import RecurrentRGCN
+                from rgcn import utils
+                from rgcn.utils import build_sub_graph
+                self.RecurrentRGCN = RecurrentRGCN
+                self.utils = utils
+                self.build_sub_graph = build_sub_graph
         except ImportError as e:
             logger.error(f"Failed to import REGCN modules: {e}")
-            raise e
+            raise
 
         # Initialize
         self.use_cuda = self.params['gpu'] >= 0 and torch.cuda.is_available()
@@ -367,7 +366,12 @@ class REGCNWrapper:
         if h_id is None or r_id is None:
             return []
             
-        t_id = self._resolve_time_id(time_str)
+        # When no time is specified, fall back to the latest time in the
+        # dataset, consistent with predict()'s behaviour.
+        if not time_str:
+            t_id = self._latest_time_id()
+        else:
+            t_id = self._resolve_time_id(time_str)
 
         if t_id is None:
             return []

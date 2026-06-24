@@ -7,11 +7,11 @@ import time
 # 配置：Anaconda Python 路径
 # ==============================================================================
 # 如果您在普通 Python 环境中运行此脚本，但希望使用 Anaconda 环境（支持 CUDA/GPU）进行训练，
-# 请在此处填入 Anaconda 环境中 python.exe 的绝对路径。
+# 请设置环境变量 ANACONDA_PYTHON_PATH 指向 Anaconda 环境中的 python.exe。
 # 方法：在 Anaconda Prompt 中输入 "where python" 获取路径。
-# 示例：r"C:\Users\Admin\anaconda3\python.exe" 或 r"D:\anaconda3\envs\myenv\python.exe"
-# 如果保持为 None，将使用当前运行此脚本的 Python 解释器。
-ANACONDA_PYTHON_PATH = r"C:\Users\Jay14\anaconda3\envs\regcn_clean\python.exe"
+# 示例：set ANACONDA_PYTHON_PATH=C:\Users\Admin\anaconda3\python.exe
+# 如果未设置该环境变量，将使用当前运行此脚本的 Python 解释器。
+ANACONDA_PYTHON_PATH = os.environ.get("ANACONDA_PYTHON_PATH")
 # ==============================================================================
 
 def train():

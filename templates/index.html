@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>金融事件问答系统</title>
-    <!-- Bootstrap CSS -->
-    <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.1/css/bootstrap.min.css" rel="stylesheet">
-    <!-- FontAwesome -->
-    <link href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.4.2/css/all.min.css" rel="stylesheet">
+    <!-- Bootstrap CSS (local vendor) -->
+    <link href="{{ url_for('static', filename='vendor/css/bootstrap.min.css') }}" rel="stylesheet">
+    <!-- FontAwesome (local vendor) -->
+    <link href="{{ url_for('static', filename='vendor/css/all.min.css') }}" rel="stylesheet">
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 </head>
 <body>
@@ -157,10 +157,10 @@
     </div>
 </div>
 
-<!-- Bootstrap Bundle with Popper -->
-<script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.1/js/bootstrap.bundle.min.js"></script>
-<!-- jQuery (for simplicity) -->
-<script src="https://cdn.bootcdn.net/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+<!-- Bootstrap Bundle with Popper (local vendor) -->
+<script src="{{ url_for('static', filename='vendor/js/bootstrap.bundle.min.js') }}"></script>
+<!-- jQuery (local vendor) -->
+<script src="{{ url_for('static', filename='vendor/js/jquery.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>

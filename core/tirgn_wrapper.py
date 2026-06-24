@@ -1,11 +1,13 @@
 import os
-import sys
 import logging
+import threading
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 import scipy.sparse as sp
+
+from core.model_imports import isolated_model_import
 
 logger = logging.getLogger(__name__)
 
@@ -24,22 +26,18 @@ class TiRGNWrapper:
         self.model_path = config["TIRGN_MODEL_PATH"]
         self.params = config["TIRGN_PARAMS"]
 
-        if self.base_dir not in sys.path:
-            sys.path.insert(0, self.base_dir)
-
-        for name in list(sys.modules.keys()):
-            if name == "rgcn" or name.startswith("rgcn.") or name == "src" or name.startswith("src."):
-                del sys.modules[name]
-
+        # Import TiRGN modules in an isolated context to avoid cross-
+        # contamination with RE-GCN's identically-named packages.
         try:
-            from rgcn import utils
-            from rgcn.utils import build_sub_graph
-            from rgcn.knowledge_graph import _read_triplets_as_list
-            from src.rrgcn import RecurrentRGCN
-            self.utils = utils
-            self.build_sub_graph = build_sub_graph
-            self._read_triplets_as_list = _read_triplets_as_list
-            self.RecurrentRGCN = RecurrentRGCN
+            with isolated_model_import(self.base_dir):
+                from rgcn import utils
+                from rgcn.utils import build_sub_graph
+                from rgcn.knowledge_graph import _read_triplets_as_list
+                from src.rrgcn import RecurrentRGCN
+                self.utils = utils
+                self.build_sub_graph = build_sub_graph
+                self._read_triplets_as_list = _read_triplets_as_list
+                self.RecurrentRGCN = RecurrentRGCN
         except Exception as e:
             logger.error(f"Failed to import TiRGN modules: {e}")
             raise
@@ -51,7 +49,7 @@ class TiRGNWrapper:
 
         self._tail_history_cache = {}
         self._rel_history_cache = {}
-        self._cache_lock = __import__('threading').Lock()
+        self._cache_lock = threading.Lock()
 
         self._load_mappings()
         self._load_data()

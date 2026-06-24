@@ -19,6 +19,10 @@ class ReasoningEngine:
         self.tirgn_model = None
         self._regcn_lock = threading.Lock()
         self._tirgn_lock = threading.Lock()
+        # Separate locks for predict calls — distinct from init locks so
+        # blocking on inference does not block model initialisation.
+        self._regcn_predict_lock = threading.Lock()
+        self._tirgn_predict_lock = threading.Lock()
 
     def _ensure_regcn_model(self):
         """Lazily initialize the REGCN model in a thread-safe way."""
@@ -58,7 +62,8 @@ class ReasoningEngine:
             return [{"name": f"REGCN initialization failed: {e}", "score": 0.0, "source": "REGCN Error"}]
 
         try:
-            return model.predict(head, relation, time, top_k=top_k)
+            with self._regcn_predict_lock:
+                return model.predict(head, relation, time, top_k=top_k)
         except Exception as e:
             logger.error(f"REGCN Prediction failed: {e}")
             return [{"name": "Prediction Error", "score": 0.0, "source": "Error"}]
@@ -94,7 +99,8 @@ class ReasoningEngine:
             logger.error(f"Failed to initialize TiRGN Model: {e}")
             return [{"name": f"TiRGN initialization failed: {e}", "score": 0.0, "source": "TiRGN Error"}]
         try:
-            return model.predict_tail(head, relation, time, top_k=top_k)
+            with self._tirgn_predict_lock:
+                return model.predict_tail(head, relation, time, top_k=top_k)
         except Exception as e:
             logger.error(f"TiRGN Prediction failed: {e}")
             return [{"name": "TiRGN prediction failed", "score": 0.0, "source": "TiRGN Error"}]

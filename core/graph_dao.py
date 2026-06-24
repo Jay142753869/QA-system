@@ -8,12 +8,14 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 class GraphDAO:
-    def __init__(self, uri, user, password, use_mock=True, local_csv_path=None):
+    def __init__(self, uri, user, password, use_mock=True, local_csv_path=None, use_demo_mock=False):
         self.use_mock = use_mock
+        self.use_demo_mock = use_demo_mock
         self.driver = None
         self.local_csv_path = local_csv_path
         self._csv_cache = {}
         self._index = None  # Pre-loaded CSV index
+        self._pair_index = None  # Pre-loaded entity-pair relation index
         self._csv_data = None  # Pre-loaded CSV data
         self._lock = threading.RLock()  # Thread-safe lock
         
@@ -38,6 +40,7 @@ class GraphDAO:
             logger.info(f"Pre-loading CSV data from {self.local_csv_path}...")
             
             self._index = defaultdict(lambda: defaultdict(list))
+            self._pair_index = defaultdict(list)
             self._csv_data = []
             
             with open(self.local_csv_path, 'r', encoding='utf-8-sig') as f:
@@ -46,14 +49,19 @@ class GraphDAO:
                     self._csv_data.append(row)
                     head = row.get('head', '')
                     relation = row.get('relation', '')
+                    tail = row.get('tail', '')
                     if head and relation:
                         self._index[head][relation].append(row)
+                    if head and relation and tail:
+                        self._pair_index[(head, tail)].append(row)
+                        self._pair_index[(tail, head)].append(row)
             
             logger.info(f"CSV pre-loaded: {len(self._csv_data)} rows, "
                        f"{len(self._index)} unique heads indexed.")
         except Exception as e:
             logger.error(f"Failed to pre-load CSV: {e}")
             self._index = None
+            self._pair_index = None
             self._csv_data = None
 
     def close(self):
@@ -90,10 +98,105 @@ class GraphDAO:
             if local:
                 return local
 
-        if self.use_mock:
+        if self.use_demo_mock:
             return self._mock_query(entity, relation, time)
-        
+
         return []
+
+    def query_entity_pair_relations(self, entity_a, entity_b, time=None):
+        """
+        Query relation names between two known entities.
+
+        This supports questions such as "蔡洪平在招商银行担任什么职务" where the
+        user supplies both endpoints but asks for the relation/job title.
+        """
+        if not entity_a or not entity_b:
+            return []
+
+        if self.driver:
+            query = """
+            MATCH (a:Entity {name: $entity_a})-[r:RELATION]-(b:Entity {name: $entity_b})
+            WHERE $time IS NULL OR r.time = $time
+            RETURN DISTINCT r.name as relation
+            """
+            try:
+                with self.driver.session() as session:
+                    result = session.run(
+                        query,
+                        entity_a=str(entity_a),
+                        entity_b=str(entity_b),
+                        time=time,
+                    )
+                    return sorted({record["relation"] for record in result if record["relation"]})
+            except Exception as e:
+                logger.error(f"Cypher pair-relation query failed: {e}")
+                return []
+
+        if self._pair_index is not None:
+            return self._indexed_pair_query(entity_a, entity_b, time)
+
+        return self._local_pair_query(entity_a, entity_b, time)
+
+    def _indexed_pair_query(self, entity_a, entity_b, time):
+        """Fast lookup of relation names between two entities."""
+        with self._lock:
+            rows = self._pair_index.get((str(entity_a), str(entity_b)), [])
+            return self._relations_from_rows(rows, time)
+
+    def _local_pair_query(self, entity_a, entity_b, time):
+        """Fallback full CSV scan for relation names between two entities."""
+        if not self.local_csv_path or not os.path.exists(self.local_csv_path):
+            return []
+
+        rows = []
+        entity_a = str(entity_a)
+        entity_b = str(entity_b)
+
+        try:
+            with open(self.local_csv_path, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    head = row.get('head', '')
+                    tail = row.get('tail', '')
+                    if (head == entity_a and tail == entity_b) or (head == entity_b and tail == entity_a):
+                        rows.append(row)
+        except Exception as e:
+            logger.error(f"Local CSV pair-relation query failed: {e}")
+            return []
+
+        return self._relations_from_rows(rows, time)
+
+    def _relations_from_rows(self, rows, time):
+        """Apply time filtering and return deduplicated relation names."""
+        time_prefix = self._normalize_time_prefix(time)
+        results = set()
+        best_time = None
+
+        for row in rows:
+            row_time = row.get('time', '')
+
+            if time_prefix:
+                if len(time_prefix) == 8:
+                    if row_time != time_prefix:
+                        continue
+                else:
+                    if not row_time.startswith(time_prefix):
+                        continue
+
+            relation = row.get('relation')
+            if not relation:
+                continue
+
+            if time_prefix and len(time_prefix) < 8:
+                if best_time is None or row_time > best_time:
+                    best_time = row_time
+                    results = {relation}
+                elif row_time == best_time:
+                    results.add(relation)
+            else:
+                results.add(relation)
+
+        return sorted(results)
 
     def _indexed_query(self, entity, relation, time):
         """Fast O(1) lookup using pre-built index."""

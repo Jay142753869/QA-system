@@ -20,6 +20,11 @@ class Config:
 
     # Graph Configuration
     USE_MOCK_GRAPH = True
+
+    # When True, GraphDAO falls back to hardcoded demo data when the CSV
+    # index misses.  Should be False in production to avoid returning
+    # incorrect facts for unrelated entities.
+    USE_DEMO_MOCK_GRAPH = False
     
     BASE_PATH = get_base_path()
     

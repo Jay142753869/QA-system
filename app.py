@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 
 from flask import Flask, jsonify, render_template, request
 
@@ -21,7 +22,30 @@ else:
 
 app.config.from_object(Config)
 
-logging.basicConfig(level=logging.INFO)
+# --- Logging setup ---
+# Console handler (always on)
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
+_console_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_console_handler.setFormatter(_console_fmt)
+
+# File handler (writes to %LOCALAPPDATA%\FinancialQA\logs\app.log)
+_log_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "FinancialQA", "logs")
+try:
+    os.makedirs(_log_dir, exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        os.path.join(_log_dir, "app.log"),
+        maxBytes=5 * 1024 * 1024,  # 5 MB per file
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _file_handler.setLevel(logging.DEBUG)
+    _file_handler.setFormatter(_console_fmt)
+    logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler], force=True)
+except Exception:
+    # Fallback to console-only if log directory is not writable
+    logging.basicConfig(level=logging.INFO, handlers=[_console_handler], force=True)
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,6 +147,7 @@ def init_system_background():
                     app.config["NEO4J_PASSWORD"],
                     use_mock=app.config["USE_MOCK_GRAPH"],
                     local_csv_path=app.config.get("GRAPH_LOCAL_CSV_PATH"),
+                    use_demo_mock=app.config.get("USE_DEMO_MOCK_GRAPH", False),
                 )
                 logger.info("Graph DAO initialized successfully.")
             except Exception as exc:
@@ -171,6 +196,31 @@ def status():
     )
 
 
+PAIR_RELATION_INTENT_TERMS = ("担任", "职务", "职位", "岗位", "关系", "之间", "是什么")
+
+
+def _extract_entity_matches(analysis):
+    """Return deduplicated entity matches from NLP analysis, in text order."""
+    entities = []
+    seen = set()
+    matches = analysis.get("ac_matches", [])
+    sorted_matches = sorted(matches, key=lambda item: item.get("start", 10**9))
+
+    for match in sorted_matches:
+        if match.get("type") != "ENTITY":
+            continue
+        word = match.get("word")
+        if word and word not in seen:
+            entities.append(word)
+            seen.add(word)
+
+    return entities
+
+
+def _is_pair_relation_question(question):
+    return any(term in question for term in PAIR_RELATION_INTENT_TERMS)
+
+
 @app.route("/api/query", methods=["POST"])
 def query():
     """Main QA endpoint: NLP -> Graph Query -> Reasoning."""
@@ -206,6 +256,7 @@ def query():
         relation = structured.get("r")
         tail = structured.get("t")
         query_time = structured.get("time")
+        entities = _extract_entity_matches(analysis)
 
         response_data = {
             "analysis": analysis,
@@ -214,15 +265,37 @@ def query():
             "reasoning_result": [],
         }
 
-        if head and relation and state.graph_dao is not None:
-            graph_result = state.graph_dao.query_entity_relation(head, relation, query_time)
-            response_data["graph_result"] = graph_result
-            if not graph_result:
-                response_data["graph_message"] = "暂无参考数据" if mode == "external" else "暂无数据"
-            elif mode == "external":
-                response_data["graph_message"] = "知识库参考（用于对比）"
+        if head and relation:
+            if state.graph_dao is not None:
+                graph_result = state.graph_dao.query_entity_relation(head, relation, query_time)
+                response_data["graph_result"] = graph_result
+                if not graph_result:
+                    response_data["graph_message"] = "暂无参考数据" if mode == "external" else "暂无数据"
+                elif mode == "external":
+                    response_data["graph_message"] = "知识库参考（用于对比）"
+            else:
+                response_data["graph_message"] = "知识库服务未就绪，无法查询。"
+        elif not relation and len(entities) >= 2 and _is_pair_relation_question(question):
+            if state.graph_dao is not None:
+                pair_relations = state.graph_dao.query_entity_pair_relations(
+                    entities[0],
+                    entities[1],
+                    query_time,
+                )
+                response_data["graph_result"] = pair_relations
+                if pair_relations:
+                    response_data["graph_message"] = ""
+                else:
+                    response_data["graph_message"] = "暂无数据"
+            else:
+                response_data["graph_message"] = "知识库服务未就绪，无法查询。"
         else:
-            response_data["graph_message"] = "未能识别明确的实体或关系，无法直接查询知识库。"
+            missing = []
+            if not head:
+                missing.append("实体")
+            if not relation:
+                missing.append("关系")
+            response_data["graph_message"] = f"未能识别明确的{'或'.join(missing)}，无法直接查询知识库。"
 
         if mode == "internal":
             if head and relation and not tail:

@@ -1,60 +1,102 @@
 # -*- mode: python ; coding: utf-8 -*-
-import sys
-sys.setrecursionlimit(5000)
 
-from PyInstaller.utils.hooks import collect_all
+import importlib.util
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 
 datas = [
-    ('templates', 'templates'),
-    ('static', 'static'),
-    ('models/RE-GCN-master/src', 'models/RE-GCN-master/src'),
-    ('models/RE-GCN-master/rgcn', 'models/RE-GCN-master/rgcn'),
-    ('models/RE-GCN-master/data/80STOCKS', 'models/RE-GCN-master/data/80STOCKS'),
-    (
-        'models/RE-GCN-master/models/80STOCKS-uvrgcn-convtranse-ly2-dilate1-his3-weight_0.5-discount_1.0-angle_10-dp0.2_0.2_0.2_0.2-gpu0',
-        'models/RE-GCN-master/models',
-    ),
-    ('models/TiRGN-main/src', 'models/TiRGN-main/src'),
-    ('models/TiRGN-main/rgcn', 'models/TiRGN-main/rgcn'),
-    ('models/TiRGN-main/data/80STOCKS', 'models/TiRGN-main/data/80STOCKS'),
-    (
-        'models/TiRGN-main/models/gl_rate_0.3-80STOCKS-convgcn-timeconvtranse-ly2-dilate1-his9-weight_0.5-discount_1.0-angle_14-dp0.2_0.2_0.2_0.2-gpu0-checkpoint',
-        'models/TiRGN-main/models',
-    ),
+    ("templates", "templates"),
+    ("static", "static"),
+    ("models/RE-GCN-master/data/80STOCKS", "models/RE-GCN-master/data/80STOCKS"),
+    ("models/RE-GCN-master/models", "models/RE-GCN-master/models"),
+    ("models/RE-GCN-master/rgcn", "models/RE-GCN-master/rgcn"),
+    ("models/RE-GCN-master/src", "models/RE-GCN-master/src"),
+    ("models/TiRGN-main/data/80STOCKS", "models/TiRGN-main/data/80STOCKS"),
+    ("models/TiRGN-main/models", "models/TiRGN-main/models"),
+    ("models/TiRGN-main/rgcn", "models/TiRGN-main/rgcn"),
+    ("models/TiRGN-main/src", "models/TiRGN-main/src"),
 ]
-binaries = []
+
 hiddenimports = [
-    'dgl', 'torch', 'transformers', 'jieba', 'ahocorasick', 'pandas', 
-    'sklearn', 'scipy', 'networkx', 'threading', 'collections', 'hashlib',
-    'logging', 'csv', 'json', 're', 'os', 'sys', 'time'
+    "jieba.finalseg",
+    "scipy",
+    "scipy.sparse",
+    "scipy.sparse.csgraph",
+    "transformers.models.bert.configuration_bert",
+    "transformers.models.bert.modeling_bert",
+    "transformers.models.bert.tokenization_bert",
+    "transformers.models.bert.tokenization_bert_fast",
+    "dgl.backend.pytorch",
+    "dgl.function",
+    "dgl.heterograph",
+    "dgl.convert",
+    "dgl.ops",
+    "dgl.nn",
+    "dgl.nn.pytorch",
 ]
 
-tmp_ret = collect_all('dgl')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+for package_name in ("transformers", "tokenizers", "huggingface_hub", "safetensors"):
+    try:
+        datas += collect_data_files(package_name)
+    except Exception:
+        pass
+    try:
+        datas += copy_metadata(package_name)
+    except Exception:
+        pass
 
-tmp_ret = collect_all('transformers')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+dgl_spec = importlib.util.find_spec("dgl")
+if dgl_spec and dgl_spec.submodule_search_locations:
+    dgl_dir = Path(next(iter(dgl_spec.submodule_search_locations)))
+    for dll_path in [
+        dgl_dir / "dgl.dll",
+        dgl_dir / "dgl_sparse" / "dgl_sparse_pytorch_2.0.0.dll",
+        dgl_dir / "dgl_sparse" / "dgl_sparse_pytorch_2.0.1.dll",
+        dgl_dir / "tensoradapter" / "pytorch" / "tensoradapter_pytorch_2.0.0.dll",
+        dgl_dir / "tensoradapter" / "pytorch" / "tensoradapter_pytorch_2.0.1.dll",
+    ]:
+        if dll_path.exists():
+            relative_parent = dll_path.parent.relative_to(dgl_dir.parent)
+            datas.append((str(dll_path), str(relative_parent)))
 
-tmp_ret = collect_all('jieba')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-
-tmp_ret = collect_all('webview')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 a = Analysis(
-    ['gui_launcher.py'],
+    ["gui_launcher.py"],
     pathex=[],
-    binaries=binaries,
+    binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['torchvision.datasets', 'torchvision.io', 'torchvision.models', 'torchvision.ops', 'torchvision.transforms', 'torchvision.utils', 'torchaudio'],
+    excludes=[
+        "matplotlib",
+        "notebook",
+        "IPython",
+        "pytest",
+        "tkinter",
+        "torchaudio",
+        "torchaudio.backend",
+        "torchaudio.datasets",
+        "torchaudio.functional",
+        "torchaudio.models",
+        "torchaudio.pipelines",
+        "torchaudio.sox_effects",
+        "torchaudio.transforms",
+        "torchvision",
+        "torchvision.datasets",
+        "torchvision.io",
+        "torchvision.models",
+        "torchvision.ops",
+        "torchvision.transforms",
+        "torchvision.utils",
+    ],
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -62,7 +104,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='FinancialQA',
+    name="FinancialQA",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -74,6 +116,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+
 coll = COLLECT(
     exe,
     a.binaries,
@@ -81,5 +124,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='FinancialQA',
+    name="FinancialQA",
 )

@@ -22,22 +22,25 @@
 
 ### 3) 外推模式说明（external）
 
-当前 `external` 模式仅在 Mock 模式下返回演示用的固定事件描述；非 Mock 模式下暂未接入真实外推模型（会返回空列表）。
+外推模式使用 TiRGN 模型进行未来事件预测。基于历史事件快照，对给定的（实体，关系）预测未来可能出现的尾实体，返回 Top-K 候选及概率。结果仅为模型预测，不构成任何投资建议。
 
 ## 目录结构
 
 ```
 问答系统模块/
 ├── app.py                  # Web 服务入口（Flask + /api/query）
-├── gui_launcher.py         # 桌面程序入口（PyWebview）
-├── config.py               # 开关与路径配置（Mock/Neo4j/RE-GCN）
+├── gui_launcher.py         # 桌面程序入口（PyWebview，自动分配端口）
+├── config.py               # 开关与路径配置（Mock/Neo4j/RE-GCN/TiRGN）
 ├── core/
 │   ├── preprocessing.py    # NLP：AC 自动机、时间识别、关系 BERT 匹配
 │   ├── graph_dao.py        # 图/本地 CSV 查询（Neo4j 失败则回退）
-│   ├── reasoning.py        # 推理引擎（Mock 或 RE-GCN）
-│   └── regcn_wrapper.py    # RE-GCN 推理封装
+│   ├── reasoning.py        # 推理引擎（RE-GCN 内推 + TiRGN 外推）
+│   ├── regcn_wrapper.py    # RE-GCN 推理封装
+│   ├── tirgn_wrapper.py    # TiRGN 外推推理封装
+│   └── model_imports.py    # 模型包隔离导入工具
 ├── models/RE-GCN-master/   # RE-GCN 源码、数据与权重
-├── static/                 # 前端静态资源（CSS/JS）
+├── models/TiRGN-main/       # TiRGN 源码、数据与权重
+├── static/                 # 前端静态资源（CSS/JS/vendor 本地依赖）
 ├── templates/              # 页面模板
 └── dist/                   # 已打包可执行文件（如已生成）
 ```
@@ -72,7 +75,15 @@ pip install pywebview
 
 - `models/RE-GCN-master/requirement.txt`
 
-4) 启动服务
+4) 启动桌面端（推荐）
+
+```bash
+python gui_launcher.py
+```
+
+桌面端会自动选择空闲本地端口，并在窗口关闭时停止 Flask 服务、释放模型与图数据库连接。若内嵌窗口不可用，会自动退回到浏览器打开同一地址。
+
+5) 启动 Web 服务
 
 ```bash
 python app.py
@@ -80,14 +91,24 @@ python app.py
 
 访问：`http://127.0.0.1:5000/`
 
+## 日志位置
+
+运行后会写入轮转日志：
+
+- Windows：`%LOCALAPPDATA%\FinancialQA\logs\app.log`
+- 其他环境：`~/FinancialQA/logs/app.log`
+
 ## 配置说明（config.py）
 
 - `USE_MOCK_GRAPH`
-  - `True`：不连接 Neo4j，优先走本地 CSV 查询（并可回退到少量 hardcode mock）。
+  - `True`：不连接 Neo4j，优先走本地 CSV 查询。
   - `False`：尝试连接 Neo4j（注意：当前 Cypher 语句要求关系类型为 `RELATION` 且关系属性包含 `name/time` 字段）。
+- `USE_DEMO_MOCK_GRAPH`
+  - `False`：CSV 未命中时返回空列表，避免为无关实体返回错误演示事实（默认）。
+  - `True`：仅用于演示/调试，允许回退到少量 hardcode mock 数据。
 - `USE_MOCK_MODELS`
   - `True`：使用 Mock 推理结果（并降低对本地 RE-GCN 环境依赖）。
-  - `False`：加载 RE-GCN 模型进行推理（需要模型权重与 RE-GCN 依赖齐全）。
+  - `False`：加载 RE-GCN/TiRGN 模型进行推理（需要模型权重与对应依赖齐全）。
 
 ## 测试问题（建议）
 
