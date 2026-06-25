@@ -110,6 +110,25 @@ class FakeACMatcher:
         }]
 
 
+class FakeMultiACMatcher:
+    def __init__(self, entities):
+        self.entities = entities
+
+    def search(self, text):
+        matches = []
+        for entity in self.entities:
+            start = text.find(entity)
+            if start < 0:
+                continue
+            matches.append({
+                "word": entity,
+                "start": start,
+                "end": start + len(entity) - 1,
+                "type": "AC_MATCH",
+            })
+        return matches
+
+
 class FakeSimilarity:
     def __init__(self, scores):
         self.scores = scores
@@ -194,6 +213,40 @@ def test_segmentation_preserves_ac_entities():
     )
 
 
+def test_structured_query_preserves_second_entity():
+    print("\n=== NLP 四元组保留第二实体 ===")
+    from core.preprocessing import NLPProcessor
+
+    processor = NLPProcessor.__new__(NLPProcessor)
+    processor.config = {}
+    processor.ac_matcher = FakeMultiACMatcher(["蔡洪平", "招商银行"])
+    processor.sim_model = FakeSimilarity([0.0])
+    processor.relation_list = []
+    processor.relation_embs = None
+    processor._relation_embs_ready = True
+    processor._relation_embs_lock = None
+    processor._ensure_relation_embeddings = lambda: None
+
+    result = processor.analyze("2025年1月，蔡洪平在招商银行一直担任什么职务?")
+    structured = result["structured_query"]
+
+    check(
+        "第一个实体进入 h",
+        structured["h"] == "蔡洪平",
+        structured,
+    )
+    check(
+        "第二个实体进入 t",
+        structured["t"] == "招商银行",
+        structured,
+    )
+    check(
+        "月份时间仍可识别",
+        structured["time"] == "2025年1月",
+        structured,
+    )
+
+
 def test_docs_synced():
     print("\n=== 文档同步 ===")
     readme = read_text("README.md")
@@ -217,6 +270,7 @@ if __name__ == "__main__":
     test_reasoning_predict_locks()
     test_h2_relation_fallback()
     test_segmentation_preserves_ac_entities()
+    test_structured_query_preserves_second_entity()
     test_docs_synced()
 
     print("\n" + "=" * 60)

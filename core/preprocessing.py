@@ -484,6 +484,8 @@ class NLPProcessor:
                 for i in range(start, end + 1):
                     occupied_indices.add(i)
         
+        ac_entity_matches = []
+
         for match in final_ac_matches:
             word = match['word']
             match_type = "UNKNOWN"
@@ -501,7 +503,7 @@ class NLPProcessor:
                 quadruple['r'] = word
                 match_type = "RELATION"
             else:
-                quadruple['h'] = word # Assume entity
+                ac_entity_matches.append(match)
                 match_type = "ENTITY"
             
             enriched_matches.append({
@@ -510,6 +512,12 @@ class NLPProcessor:
                 "end": match['end'],
                 "type": match_type
             })
+
+        ac_entity_matches.sort(key=lambda item: item["start"])
+        if ac_entity_matches:
+            quadruple['h'] = ac_entity_matches[0]['word']
+        if len(ac_entity_matches) >= 2:
+            quadruple['t'] = ac_entity_matches[1]['word']
 
         # 2. Dynamic Regex Match (Priority 2: Time)
         # Match patterns like: 2018年, 2024年, 5月, 2024-05
