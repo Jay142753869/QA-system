@@ -165,6 +165,35 @@ def test_h2_relation_fallback():
     )
 
 
+def test_segmentation_preserves_ac_entities():
+    print("\n=== NLP 展示分词保留已识别实体 ===")
+    from core.preprocessing import NLPProcessor
+
+    processor = NLPProcessor.__new__(NLPProcessor)
+    processor.config = {}
+    processor.ac_matcher = FakeACMatcher("蔡洪平")
+    processor.sim_model = FakeSimilarity([0.0])
+    processor.relation_list = []
+    processor.relation_embs = None
+    processor._relation_embs_ready = True
+    processor._relation_embs_lock = None
+    processor._ensure_relation_embeddings = lambda: None
+
+    result = processor.analyze("蔡洪平和招商银行之间是什么关系?")
+    tokens = [item["word"] for item in result["segmentation"]]
+
+    check(
+        "展示分词包含完整实体蔡洪平",
+        "蔡洪平" in tokens,
+        f"tokens={tokens}",
+    )
+    check(
+        "展示分词不再把蔡洪平切成蔡洪/平和",
+        "蔡洪" not in tokens and "平和" not in tokens,
+        f"tokens={tokens}",
+    )
+
+
 def test_docs_synced():
     print("\n=== 文档同步 ===")
     readme = read_text("README.md")
@@ -187,6 +216,7 @@ if __name__ == "__main__":
     test_logging_and_training_config()
     test_reasoning_predict_locks()
     test_h2_relation_fallback()
+    test_segmentation_preserves_ac_entities()
     test_docs_synced()
 
     print("\n" + "=" * 60)

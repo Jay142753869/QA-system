@@ -291,6 +291,48 @@ class NLPProcessor:
         self._relation_embs_lock = threading.Lock()
         self._load_relations()
 
+    def _segment_text(self, text):
+        """Run Jieba POS segmentation and return frontend-friendly dicts."""
+        return [{"word": w, "flag": f} for w, f in pseg.cut(text)]
+
+    def _build_display_segmentation(self, text, matches, fallback_segments):
+        """
+        Build display tokens by preserving AC-recognized spans.
+
+        Jieba can split known names incorrectly (for example, "蔡洪平和" can
+        become "蔡洪" + "平和").  For UI display, known entity/relation/time
+        spans should override the generic Jieba segmentation.
+        """
+        display_matches = [
+            match for match in matches
+            if match.get("start", -1) >= 0
+            and match.get("end", -1) >= match.get("start", -1)
+            and match.get("type") in {"ENTITY", "RELATION", "TIME"}
+        ]
+
+        if not display_matches:
+            return fallback_segments
+
+        display_matches.sort(key=lambda item: (item["start"], -(item["end"] - item["start"])))
+
+        segments = []
+        cursor = 0
+        for match in display_matches:
+            start = match["start"]
+            end = match["end"] + 1
+            if start < cursor:
+                continue
+            if start > cursor:
+                segments.extend(self._segment_text(text[cursor:start]))
+            word = text[start:end]
+            segments.append({"word": word, "flag": match["type"]})
+            cursor = end
+
+        if cursor < len(text):
+            segments.extend(self._segment_text(text[cursor:]))
+
+        return [segment for segment in segments if segment["word"]]
+
     def _load_relations(self):
         """Load relation names and defer embedding computation until needed."""
         rel_file = os.path.join(get_cfg(self.config, 'REGCN_DATA_DIR', ''), 'relation2id.txt')
@@ -511,10 +553,10 @@ class NLPProcessor:
                 })
 
         # 3. Jieba Segmentation (Priority 3: Fallback for Unknown Entities)
-        words = pseg.cut(text)
-        seg_results = []
-        for w, f in words:
-            seg_results.append({"word": w, "flag": f})
+        seg_results = self._segment_text(text)
+        for seg in seg_results:
+            w = seg["word"]
+            f = seg["flag"]
             
             # Fallback Logic: If no Entity found yet, look for Nouns (nr, ns, nt, nz)
             if not quadruple['h']:
@@ -593,7 +635,7 @@ class NLPProcessor:
         return {
             "original_text": text,
             "ac_matches": enriched_matches,
-            "segmentation": seg_results,
+            "segmentation": self._build_display_segmentation(text, enriched_matches, seg_results),
             "structured_query": quadruple,
             "embedding_sample": embedding[:5].tolist() # Just show first 5 dims
         }
